@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+session.json
+rm --cached session.json
+git rm -r --cached __pycache__/
