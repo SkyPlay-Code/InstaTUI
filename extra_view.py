@@ -29,37 +29,66 @@ class ExtraView(Vertical):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "load-threads-btn":
-            self.query_one("#dl-log").write("[bold blue]=> Initializing Thread Fetch...[/bold blue]")
+            event.button.disabled = True
             self.load_threads()
         elif event.button.id == "start-dl-btn":
             limit_val = self.query_one("#dl-limit-input").value
             limit = int(limit_val) if limit_val.isdigit() else 0
-            for btn in self.query(Button): btn.disabled = True
+            for btn in self.query(Button): 
+                btn.disabled = True
             self.download_chat(self.selected_thread, limit)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.selected_thread = self.loaded_threads[event.option_index]
         title = getattr(self.selected_thread, 'thread_title', None) or ", ".join([u.username for u in self.selected_thread.users])
-        self.query_one("#dl-log").write(f"Target Acquired: [bold yellow]{title}[/bold yellow]")
-        self.query_one("#start-dl-btn").disabled = False
+        self.safe_write_log(f"Target Acquired: [bold yellow]{title}[/bold yellow]")
+        try:
+            self.query_one("#start-dl-btn", Button).disabled = False
+        except Exception:
+            pass
 
     @work(thread=True)
     def load_threads(self):
         cl = self.app.ig_client
-        log = self.query_one("#dl-log")
+        self.app.call_from_thread(self.safe_write_log, "[bold blue]=> Initializing Thread Fetch...[/bold blue]")
         try:
             threads = cl.direct_threads(amount=30)
             self.app.call_from_thread(self.populate_threads, threads)
         except Exception as e:
-            self.app.call_from_thread(log.write, f"[bold red]❌ Error: {e}[/bold red]")
+            self.app.call_from_thread(self.safe_write_log, f"[bold red]❌ Error: {e}[/bold red]")
+            self.app.call_from_thread(self.safe_enable_buttons)
 
     def populate_threads(self, threads):
-        self.loaded_threads = threads
-        opt_list = self.query_one("#dl-thread-list")
-        opt_list.clear_options()
-        for t in threads:
-            title = getattr(t, 'thread_title', None) or ", ".join([u.username for u in t.users])
-            opt_list.add_option(f"💬 {title}")
+        try:
+            self.loaded_threads = threads
+            opt_list = self.query_one("#dl-thread-list", OptionList)
+            opt_list.clear_options()
+            for t in threads:
+                title = getattr(t, 'thread_title', None) or ", ".join([u.username for u in t.users])
+                opt_list.add_option(f"💬 {title}")
+        except Exception:
+            pass
+        finally:
+            self.safe_enable_buttons()
+
+    def safe_write_log(self, text: str) -> None:
+        """Main-thread safe writing helper that tolerates component unmounting."""
+        try:
+            self.query_one("#dl-log", RichLog).write(text)
+        except Exception:
+            pass
+
+    def safe_enable_buttons(self) -> None:
+        """Main-thread safe helper to update active and disabled states for buttons."""
+        try:
+            self.query_one("#load-threads-btn", Button).disabled = False
+            # Keep start button disabled if no thread is chosen yet
+            if self.selected_thread:
+                self.query_one("#start-dl-btn", Button).disabled = False
+            else:
+                self.query_one("#start-dl-btn", Button).disabled = True
+        except Exception:
+            pass
 
     def get_media_url(self, msg):
         """The identical Object-Mapping attribute puller!"""
@@ -82,7 +111,6 @@ class ExtraView(Vertical):
     @work(thread=True)
     def download_chat(self, thread, limit):
         cl = self.app.ig_client
-        log = self.query_one("#dl-log")
         title = getattr(thread, 'thread_title', None) or ", ".join([u.username for u in thread.users])
         safe_title = "".join([c for c in title if c.isalnum() or c in (' ', '_')]).rstrip()
         
@@ -92,7 +120,7 @@ class ExtraView(Vertical):
         try:
             fetch_amount = limit if limit > 0 else 0
             limit_str = str(limit) if limit > 0 else "ALL"
-            self.app.call_from_thread(log.write, f"📡 Hitting Instagram DB for [bold]{limit_str}[/bold] messages... (Applying safe delays)")
+            self.app.call_from_thread(self.safe_write_log, f"📡 Hitting Instagram DB for [bold]{limit_str}[/bold] messages... (Applying safe delays)")
             
             messages = cl.direct_messages(thread.id, amount=fetch_amount)
             messages.reverse()
@@ -118,7 +146,7 @@ class ExtraView(Vertical):
                             filename = f"media_{msg.id}{ext}"
                             filepath = os.path.join(folder_name, filename)
                             
-                            self.app.call_from_thread(log.write, f"  ↳ ⬇ Downloading {ext.replace('.','')}: {filename}")
+                            self.app.call_from_thread(self.safe_write_log, f"  ↳ ⬇ Downloading {ext.replace('.','')}: {filename}")
                             
                             try:
                                 r = requests.get(url, stream=True, timeout=10)
@@ -128,15 +156,15 @@ class ExtraView(Vertical):
                                     f.write(f"[{time_str}] {sender}: <Local Media: {filename}>\n")
                                 else:
                                     f.write(f"[{time_str}] {sender}: <Download Failed {r.status_code}>\n")
-                            except: pass
+                            except Exception:
+                                pass
                         else:
                             f.write(f"[{time_str}] {sender}: <{msg.item_type.upper()}>\n")
 
                     if count % 15 == 0: time.sleep(random.uniform(1.0, 3.5))
 
-            self.app.call_from_thread(log.write, f"[bold green]✅ ARCHIVE COMPLETE![/bold green] Total: {count} entries.")
+            self.app.call_from_thread(self.safe_write_log, f"[bold green]✅ ARCHIVE COMPLETE![/bold green] Total: {count} entries.")
         except Exception as e:
-            self.app.call_from_thread(log.write, f"[bold red]❌ Pipeline Error: {e}[/bold red]")
+            self.app.call_from_thread(self.safe_write_log, f"[bold red]❌ Pipeline Error: {e}[/bold red]")
         finally:
-            self.app.call_from_thread(self.query_one("#start-dl-btn").__setattr__, "disabled", False)
-            self.app.call_from_thread(self.query_one("#load-threads-btn").__setattr__, "disabled", False)
+            self.app.call_from_thread(self.safe_enable_buttons)

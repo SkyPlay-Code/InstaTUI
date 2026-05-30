@@ -43,6 +43,10 @@ class NotesView(Vertical):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "music-search":
+            cl = getattr(self.app, 'ig_client', None)
+            if not cl:
+                self.app.notify("Please log in to your Instagram account first.", severity="error")
+                return
             query = event.input.value.strip()
             self.query_one("#music-list", OptionList).clear_options()
             if query:
@@ -53,20 +57,34 @@ class NotesView(Vertical):
                 self.fetch_trending_music()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        cl = getattr(self.app, 'ig_client', None)
+
         if event.button.id == "refresh-notes-btn":
+            if not cl:
+                self.app.notify("Please log in to your Instagram account first.", severity="error")
+                return
             self.query_one("#notes-loading").display = True
             self.query_one("#notes-list").display = False
             self.fetch_notes_raw()
             
         elif event.button.id == "post-note-btn":
+            if not cl:
+                self.app.notify("Please log in to your Instagram account first.", severity="error")
+                return
             text = self.query_one("#note-input").value.strip()
             self.query_one("#post-note-btn").disabled = True
             self.post_new_note(text)
             
         elif event.button.id == "delete-note-btn":
+            if not cl:
+                self.app.notify("Please log in to your Instagram account first.", severity="error")
+                return
             self.delete_my_note()
             
         elif event.button.id == "browse-music-btn":
+            if not cl:
+                self.app.notify("Please log in to your Instagram account first.", severity="error")
+                return
             self.query_one("#music-container").display = True
             self.query_one("#notes-list").display = False
             self.query_one("#notes-controls").display = False
@@ -78,6 +96,9 @@ class NotesView(Vertical):
             self.query_one("#notes-controls").display = True
             
         elif event.button.id == "confirm-music-btn":
+            if not cl:
+                self.app.notify("Please log in to your Instagram account first.", severity="error")
+                return
             text = self.query_one("#note-input").value.strip()
             music_list = self.query_one("#music-list", OptionList)
             if music_list.highlighted is not None and self.music_cache:
@@ -86,6 +107,9 @@ class NotesView(Vertical):
                 self.post_music_note(text, selected_track)
                 
         elif event.button.id == "play-audio-btn":
+            if not cl:
+                self.app.notify("Please log in to your Instagram account first.", severity="error")
+                return
             list_ui = self.query_one("#notes-list", OptionList)
             if list_ui.highlighted is not None and self.notes_cache:
                 # Cache contains raw dicts now!
@@ -115,18 +139,25 @@ class NotesView(Vertical):
                 if res: return res
         return None
 
-    @work(thread=True)
     def play_note_audio(self, url, title):
+        """Play selected audio on the main thread to safely suspend the event loop."""
         try:
-            self.app.call_from_thread(self.app.notify, f"🎧 Playing: {title}", timeout=4)
+            self.app.notify(f"🎧 Playing: {title}", timeout=4)
             with self.app.suspend():
                 print("\033[2J\033[H", end="") 
                 print(f"🎵 LISTENING TO INSTAGRAM NOTE: {title}")
                 print("Press 'q' at any time to stop the track.")
                 print("-" * 50)
-                subprocess.run(["mpv", "--quiet", str(url)])
+                try:
+                    subprocess.run(["mpv", "--quiet", str(url)])
+                except FileNotFoundError:
+                    print("\nError: 'mpv' media player is not installed or not in your PATH.")
+                    input("\nPress Enter to return to the app...")
+                except Exception as e:
+                    print(f"\nAudio Playback Error: {e}")
+                    input("\nPress Enter to return to the app...")
         except Exception as e:
-            self.app.call_from_thread(self.app.notify, f"Audio Error: {e}", severity="error")
+            self.app.notify(f"Audio Error: {e}", severity="error")
 
     # ==========================
     # WORKER THREADS (API CALLS)
@@ -135,7 +166,9 @@ class NotesView(Vertical):
     @work(thread=True)
     def fetch_notes_raw(self):
         """Bypasses instagrapi's Note wrapper so Music data isn't deleted!"""
-        cl = self.app.ig_client
+        cl = getattr(self.app, 'ig_client', None)
+        if not cl:
+            return  # Fail silently if called before client is ready (e.g. on mount)
         try:
             # We hit the endpoint directly and take the raw JSON dicts
             res = cl.private_request("notes/get_notes/")
@@ -146,7 +179,10 @@ class NotesView(Vertical):
 
     @work(thread=True)
     def fetch_trending_music(self):
-        cl = self.app.ig_client
+        cl = getattr(self.app, 'ig_client', None)
+        if not cl:
+            self.app.call_from_thread(self.app.notify, "Error: Instagram client is not initialized.", severity="error")
+            return
         try:
             music_data = cl.notes_music_browser()
             self.alacorn_session_id = music_data.get("alacorn_session_id")
@@ -161,11 +197,13 @@ class NotesView(Vertical):
         except Exception as e:
             self.app.call_from_thread(self.app.notify, f"Music Error: {e}", severity="error")
 
-    
     @work(thread=True)
     def fetch_searched_music_raw(self, query):
         """Bypasses instagrapi's broken search wrapper and uses GET params!"""
-        cl = self.app.ig_client
+        cl = getattr(self.app, 'ig_client', None)
+        if not cl:
+            self.app.call_from_thread(self.app.notify, "Error: Instagram client is not initialized.", severity="error")
+            return
         try:
             # We must use `params` to force a GET request, avoiding the 405 error!
             payload = {
@@ -197,43 +235,68 @@ class NotesView(Vertical):
             
         self.query_one("#music-header", Label).update(f"{title} ({len(tracks)} found)")
 
+    def handle_post_success(self):
+        """Safely updates UI on the main thread after a standard note post."""
+        self.query_one("#note-input").value = ""
+        self.fetch_notes_raw()
+
+    def enable_post_button(self):
+        """Safely re-enables the standard note post button on the main thread."""
+        self.query_one("#post-note-btn").disabled = False
+
     @work(thread=True)
     def post_new_note(self, text):
-        cl = self.app.ig_client
+        cl = getattr(self.app, 'ig_client', None)
+        if not cl:
+            self.app.call_from_thread(self.app.notify, "Error: Instagram client is not initialized.", severity="error")
+            return
         try:
             cl.create_note(text, audience=0)
             self.app.call_from_thread(self.app.notify, "✅ Note Posted Successfully!")
-            self.app.call_from_thread(self.query_one("#note-input").__setattr__, "value", "")
-            self.fetch_notes_raw()
+            self.app.call_from_thread(self.handle_post_success)
         except Exception as e:
             self.app.call_from_thread(self.app.notify, f"Post Error: {e}", severity="error")
         finally:
-            self.app.call_from_thread(self.query_one("#post-note-btn").__setattr__, "disabled", False)
+            self.app.call_from_thread(self.enable_post_button)
+
+    def handle_music_post_success(self):
+        """Safely updates UI on the main thread after a music note post."""
+        self.query_one("#note-input").value = ""
+        self.query_one("#cancel-music-btn").press()
+        self.fetch_notes_raw()
+
+    def enable_confirm_music_button(self):
+        """Safely re-enables the music note confirm button on the main thread."""
+        self.query_one("#confirm-music-btn").disabled = False
 
     @work(thread=True)
     def post_music_note(self, text, track):
-        cl = self.app.ig_client
+        cl = getattr(self.app, 'ig_client', None)
+        if not cl:
+            self.app.call_from_thread(self.app.notify, "Error: Instagram client is not initialized.", severity="error")
+            return
         try:
             cl.create_music_note(track=track, text=text, audience=0, alacorn_session_id=self.alacorn_session_id)
             self.app.call_from_thread(self.app.notify, "✅ Music Note Posted!")
-            self.app.call_from_thread(self.query_one("#note-input").__setattr__, "value", "")
-            self.app.call_from_thread(self.query_one("#cancel-music-btn").press)
-            self.fetch_notes_raw()
+            self.app.call_from_thread(self.handle_music_post_success)
         except Exception as e:
             self.app.call_from_thread(self.app.notify, f"Music Post Error: {e}", severity="error")
         finally:
-            self.app.call_from_thread(self.query_one("#confirm-music-btn").__setattr__, "disabled", False)
+            self.app.call_from_thread(self.enable_confirm_music_button)
 
     @work(thread=True)
     def delete_my_note(self):
-        cl = self.app.ig_client
+        cl = getattr(self.app, 'ig_client', None)
+        if not cl:
+            self.app.call_from_thread(self.app.notify, "Error: Instagram client is not initialized.", severity="error")
+            return
         try:
             notes = cl.get_notes()
             my_note = cl.get_note_by_user(notes, cl.username_from_user_id(cl.user_id))
             if my_note:
                 cl.delete_note(my_note.id)
                 self.app.call_from_thread(self.app.notify, "✅ Note Deleted.")
-                self.fetch_notes_raw()
+                self.app.call_from_thread(self.fetch_notes_raw)
             else:
                 self.app.call_from_thread(self.app.notify, "No active Note to delete.", severity="warning")
         except Exception as e:
@@ -255,7 +318,8 @@ class NotesView(Vertical):
             list_ui.add_option("Nobody has posted any Notes recently.")
             return
 
-        my_uid = str(self.app.ig_client.user_id)
+        cl = getattr(self.app, 'ig_client', None)
+        my_uid = str(getattr(cl, 'user_id', '')) if cl else ''
 
         for note_dict in raw_notes:
             user = note_dict.get('user', {})

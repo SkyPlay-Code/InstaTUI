@@ -61,4 +61,6 @@ class InboxView(Vertical):
 
     def show_error(self, error_msg: str):
         self.query_one("#loading").display = False
-        self.query_one("#inbox-header", Label).update(f"❌ Failed to load: {error_msg}")
+        # By replacing '[' with '\[' we tell Textual not to parse it as markup!
+        safe_error = error_msg.replace("[", "\\[")
+        self.query_one("#inbox-header", Label).update(f"❌ Failed to load: {safe_error}")

@@ -9,7 +9,8 @@ from reels_view import ReelsView
 from account_view import AccountView
 from extra_view import ExtraView 
 from notes_view import NotesView  
-from ghost_view import GhostView # <-- IMPORT NEW GHOST MODULE
+from ghost_view import GhostView
+from explore_view import ExploreView # <-- NEW IMPORT
 
 class DashboardScreen(Screen):
     def compose(self):
@@ -22,9 +23,12 @@ class DashboardScreen(Screen):
             with TabPane("📝 NOTES", id="notes-tab"):
                 yield NotesView()
 
-            # <-- GHOST VIEWER TAB
             with TabPane("👻 GHOST", id="ghost-tab"):
                 yield GhostView()
+                
+            # <-- DISCOVERY ENGINE TAB
+            with TabPane("🌍 EXPLORE", id="explore-tab"):
+                yield ExploreView()
 
             with TabPane("🕵️‍♂️ PROFILE", id="profile-tab"):
                 yield ProfileView()

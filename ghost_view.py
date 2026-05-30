@@ -15,12 +15,11 @@ class GhostView(Vertical):
             yield Label("💡 HACKER TIP: Use Ctrl+V (or Ctrl+Shift+V) to Paste!", classes="ghost-tip")
             
             with Horizontal(classes="action-row"):
-                yield Input(placeholder="Target Username (e.g. instagram)...", id="ghost-target")
+                yield Input(placeholder="Target Username (e.g. zuck)...", id="ghost-target")
                 yield Button("🔍 Scan Profile", id="ghost-scan-btn", variant="primary")
             
             yield LoadingIndicator(id="ghost-loading")
             
-            # Two-panel layout: Categories on the left, Story Frames on the right
             with Horizontal(id="ghost-panels"):
                 with Vertical(classes="ghost-panel"):
                     yield Label("📂 Available Folders", classes="panel-title")
@@ -34,7 +33,6 @@ class GhostView(Vertical):
         self.query_one("#ghost-loading").display = False
         self.query_one("#ghost-panels").display = False
         
-        # State Management
         self.active_stories = []
         self.highlights_map = {} 
         self.category_keys = []  
@@ -54,20 +52,16 @@ class GhostView(Vertical):
                 self.fetch_target_data(username)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        # LEFT PANEL CLICK: Load Folder
+        # Left Panel (Folders)
         if event.option_list.id == "category-list":
             selected_key = self.category_keys[event.option_index]
             self.load_frames_for_category(selected_key)
             
-        # RIGHT PANEL CLICK: Play Story!
+        # Right Panel (Frames)
         elif event.option_list.id == "frame-list":
             if not self.current_frames: return
             selected_frame = self.current_frames[event.option_index]
             self.play_ghost_frame(selected_frame)
-
-    # ===============================
-    # WORKERS & LOGIC
-    # ===============================
 
     @work(thread=True)
     def fetch_target_data(self, username):
@@ -76,11 +70,9 @@ class GhostView(Vertical):
             self.app.call_from_thread(self.query_one("#ghost-header").update, f"👻 Ghosting @{username} (Finding ID...)")
             user_id = cl.user_id_from_username(username)
             
-            # Fetch active 24h stories
             self.app.call_from_thread(self.query_one("#ghost-header").update, "👻 Fetching 24h Stories...")
             active = cl.user_stories(user_id)
             
-            # Fetch highlight tray
             self.app.call_from_thread(self.query_one("#ghost-header").update, "👻 Fetching Profile Highlights...")
             highlights = cl.user_highlights(user_id)
             
@@ -89,7 +81,7 @@ class GhostView(Vertical):
         except Exception as e:
             err = str(e)
             if "private" in err.lower() or "not authorized" in err.lower():
-                self.app.call_from_thread(self.app.notify, "❌ Cannot ghost private profiles! (You don't follow them)", severity="error")
+                self.app.call_from_thread(self.app.notify, "❌ Cannot ghost private profiles!", severity="error")
             else:
                 self.app.call_from_thread(self.app.notify, f"Error: {err}", severity="error")
             self.app.call_from_thread(self.reset_ui)
@@ -157,11 +149,10 @@ class GhostView(Vertical):
             is_video = getattr(f, 'media_type', 1) == 2
             icon = "🎥 Video" if is_video else "📸 Photo"
             
-            # Safe timestamp check from types.py
             if getattr(f, 'taken_at', None):
                 time_str = f.taken_at.astimezone().strftime("%Y-%m-%d %I:%M %p")
             else:
-                time_str = "Unknown Date"
+                time_str = "Unknown Time"
                 
             frame_list.add_option(f"{icon} | {time_str}")
 
@@ -171,9 +162,13 @@ class GhostView(Vertical):
         is_video = getattr(story, 'media_type', 1) == 2
         
         try:
-            url = getattr(story, 'video_url', None) if is_video else getattr(story, 'thumbnail_url', None)
-            
-            if not url:
+            url_val = getattr(story, 'video_url', None) if is_video else getattr(story, 'thumbnail_url', None)
+            if url_val is None:
+                self.app.call_from_thread(self.app.notify, "Missing CDN Link.", severity="error")
+                return
+
+            url = str(url_val).strip()
+            if not url or url.lower() == "none":
                 self.app.call_from_thread(self.app.notify, "Missing CDN Link.", severity="error")
                 return
 
@@ -183,31 +178,48 @@ class GhostView(Vertical):
             filename = f"ghost_cache_{story.pk}{ext}"
             path = os.path.join(".", filename)
             
-            # The True Ghost method: Raw HTTP GET directly from Meta's CDNs
-            r = requests.get(url, stream=True, timeout=10)
-            if r.status_code == 200:
-                with open(path, 'wb') as f:
-                    for chunk in r.iter_content(1024):
-                        f.write(chunk)
-            else:
-                raise Exception(f"CDN Returned {r.status_code}")
+            # The True Ghost method: Raw HTTP GET directly from Meta's CDNs!
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0.0.0"
+            }
+            r = requests.get(url, stream=True, headers=headers, timeout=15)
+            r.raise_for_status()
             
-            # Play locally in the terminal with TCT
+            with open(path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Play locally in the terminal
             with self.app.suspend():
                 print("\033[2J\033[H", end="") 
                 print("👻 GHOST VIEW ACTIVE (You are completely invisible)")
-                print("Press 'q' at any time to return to the Dashboard.")
+                print("Press 'q' at any time to return to TUI.")
                 print("-" * 50)
                 
-                # --keep-open ensures MPV pauses on the last frame so photos don't vanish instantly!
-                cmd = ["mpv", "--vo=tct", "--quiet", "--keep-open=yes", str(path)]
-                subprocess.run(cmd)
+                # Using list arguments with shell=False (default) avoids shell injection entirely
+                cmd = ["mpv", "--vo=tct", "--quiet"]
+                if not is_video:
+                    cmd.append("--image-display-duration=inf")
+                cmd.append(path)
+                
+                try:
+                    subprocess.run(cmd)
+                except FileNotFoundError:
+                    self.app.call_from_thread(
+                        self.app.notify, 
+                        "Error: 'mpv' media player is not installed or not in PATH.", 
+                        severity="error"
+                    )
                     
         except Exception as e:
             self.app.call_from_thread(self.app.notify, f"Stealth View Error: {e}", severity="error")
         finally:
             if path and os.path.exists(path):
-                os.remove(path)
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     def reset_ui(self):
         self.query_one("#ghost-scan-btn").disabled = False

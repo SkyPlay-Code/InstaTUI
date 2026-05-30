@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 session.json
+downloads/
 rm --cached session.json
 git rm -r --cached __pycache__/
