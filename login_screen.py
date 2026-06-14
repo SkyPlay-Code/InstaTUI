@@ -1,11 +1,12 @@
 # login_screen.py
 from textual.screen import Screen
-from textual.widgets import Input, Button, Label
+from textual.widgets import Input, Button, Static, Label
 from textual.containers import Vertical
 from textual import work
+from instagrapi.exceptions import ChallengeRequired, TwoFactorRequired 
 
 class LoginScreen(Screen):
-    """The Screen where users enter credentials."""
+    """The Screen where users enter credentials and handle challenges natively."""
 
     def compose(self):
         with Vertical(id="login-form"):
@@ -13,70 +14,90 @@ class LoginScreen(Screen):
             yield Input(placeholder="Username", id="username")
             yield Input(placeholder="Password", password=True, id="password")
             yield Button("Login", variant="primary", id="login-btn")
+            
+            # Resumes the login flow natively!
+            yield Button("📱 I Approved It On My Phone (Resume)", variant="warning", id="resume-btn", disabled=True)
+            
             yield Label("Ready.", id="status-msg")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "login-btn":
-            self.trigger_login()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id in ("username", "password"):
-            self.trigger_login()
-
-    def trigger_login(self) -> None:
-        # Check if already processing to avoid concurrent requests
-        try:
-            if self.query_one("#login-btn", Button).disabled:
-                return
-        except Exception:
-            pass
-
-        username = self.query_one("#username", Input).value
-        password = self.query_one("#password", Input).value
-        
-        if username and password:
-            self.set_loading_state(True)
-            self.query_one("#status-msg", Label).update("Logging in... please wait.")
-            self.run_login(username, password)
-        else:
-            self.query_one("#status-msg", Label).update("Please fill all fields!")
-
-    def set_loading_state(self, loading: bool) -> None:
-        """Enables or disables input elements and changes button state to prevent overlapping calls."""
-        try:
-            login_btn = self.query_one("#login-btn", Button)
-            username_input = self.query_one("#username", Input)
-            password_input = self.query_one("#password", Input)
+            username = self.query_one("#username", Input).value
+            password = self.query_one("#password", Input).value
             
-            login_btn.disabled = loading
-            username_input.disabled = loading
-            password_input.disabled = loading
-            
-            if loading:
-                login_btn.label = "Logging in... ⏳"
+            if username and password:
+                self.query_one("#status-msg", Label).update("Logging in... please wait.")
+                self.run_login(username, password)
             else:
-                login_btn.label = "Login"
-        except Exception:
-            pass
+                self.query_one("#status-msg", Label).update("Please fill all fields!")
+                
+        elif event.button.id == "resume-btn":
+            self.query_one("#status-msg", Label).update("Resuming login flow...")
+            self.query_one("#resume-btn").disabled = True
+            self.resume_login()
 
     @work(thread=True)
     def run_login(self, username, password):
-        """Runs the login request in a background thread."""
         try:
-            # self.app accesses the main InstaTermApp
             self.app.ig_client.login(username, password)
             self.app.ig_client.dump_settings("session.json")
+            self.app.call_from_thread(self.go_to_dashboard)
             
-            # Use call_from_thread to safely update UI from a background thread
-            self.app.call_from_thread(self.go_to_inbox)
+        except TwoFactorRequired as e:
+            self.app.call_from_thread(self.prompt_2fa_ui, username, password)
+            
+        except ChallengeRequired as e:
+            # Native 2.10.8 ChallengeRequired
+            self.app.call_from_thread(self.show_manual_approval_needed)
+            
         except Exception as e:
             self.app.call_from_thread(self.show_error, str(e))
 
-    def go_to_inbox(self):
-        """Switches to the main dashboard."""
-        self.set_loading_state(False)
+    def prompt_2fa_ui(self, username, password):
+        self.query_one("#status-msg", Label).update("🔒 Two-Factor Required! Check your Authenticator / SMS.")
+        
+        def callback(code):
+            if code:
+                self.query_one("#status-msg", Label).update("Submitting 2FA code...")
+                self.submit_2fa_login(username, password, code)
+                
+        from challenge_screen import ChallengeScreen
+        self.app.push_screen(ChallengeScreen(), callback)
+
+    @work(thread=True)
+    def submit_2fa_login(self, username, password, code):
+        try:
+            self.app.ig_client.login(username, password, verification_code=code)
+            self.app.ig_client.dump_settings("session.json")
+            self.app.call_from_thread(self.go_to_dashboard)
+        except Exception as e:
+            self.app.call_from_thread(self.show_error, str(e))
+
+    @work(thread=True)
+    def resume_login(self):
+        try:
+            username = self.query_one("#username", Input).value
+            password = self.query_one("#password", Input).value
+            
+            # CALLS THE NEW NATIVE METHOD!
+            self.app.ig_client.challenge_bloks_redirect_dismiss()
+            
+            self.app.call_from_thread(self.query_one("#status-msg", Label).update, "Block lifted! Fetching new cookies...")
+            self.app.ig_client.login(username, password)
+            self.app.ig_client.dump_settings("session.json")
+            self.app.call_from_thread(self.go_to_dashboard)
+        except Exception as e:
+            self.app.call_from_thread(self.show_error, f"Resume failed: {e}")
+
+    def show_manual_approval_needed(self):
+        self.query_one("#status-msg", Label).update("⚠️ Open Instagram app on phone, tap 'It was me', then click Resume.")
+        self.query_one("#resume-btn").disabled = False
+        self.query_one("#login-btn").disabled = True
+
+    def go_to_dashboard(self):
         self.app.switch_screen("dashboard")
 
     def show_error(self, error_msg: str):
-        self.set_loading_state(False)
-        self.query_one("#status-msg", Label).update(f"❌ Error: {error_msg}")
+        safe_error = error_msg.replace("[", "\\[")
+        self.query_one("#status-msg", Label).update(f"❌ Error: {safe_error}")
+        self.query_one("#login-btn").disabled = False
