@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import (
     BaseModel,
@@ -14,6 +14,9 @@ from pydantic import (
 
 class TypesBaseModel(BaseModel):
     model_config = ConfigDict(coerce_numbers_to_str=True)  # (jarrodnorwell) fixed city_id issue
+
+
+StoryResizeMode = Literal["fill", "fit"]
 
 
 def validate_external_url(cls, v):
@@ -145,6 +148,17 @@ class Account(TypesBaseModel):
         raise ValidationError("external_url must be a URL or string")
 
 
+class RelationshipShort(TypesBaseModel):
+    user_id: str
+    following: bool
+    incoming_request: bool
+    is_bestie: bool
+    is_feed_favorite: bool
+    is_private: bool
+    is_restricted: bool
+    outgoing_request: bool
+
+
 class UserShort(TypesBaseModel):
     def __hash__(self):
         return hash(self.pk)
@@ -164,6 +178,12 @@ class UserShort(TypesBaseModel):
     is_verified: Optional[bool] = None
     latest_reel_media: Optional[int] = None
     has_anonymous_profile_picture: Optional[bool] = None
+    profile_pic_id: Optional[str] = None
+    fbid_v2: Optional[str] = None
+    interop_messaging_user_fbid: Optional[str] = None
+    strong_id__: Optional[str] = None
+    account_badges: List[dict] = Field(default_factory=list)
+    friendship_status: Optional[RelationshipShort] = None
 
 
 class Viewer(UserShort):
@@ -989,17 +1009,6 @@ class Relationship(TypesBaseModel):
     is_private: bool
     is_restricted: bool
     muting: bool
-    outgoing_request: bool
-
-
-class RelationshipShort(TypesBaseModel):
-    user_id: str
-    following: bool
-    incoming_request: bool
-    is_bestie: bool
-    is_feed_favorite: bool
-    is_private: bool
-    is_restricted: bool
     outgoing_request: bool
 
 

@@ -118,6 +118,36 @@ class ClipMixin:
             },
         )
 
+    def clip_seen(self, media_ids: List[str], blend_media_ids: Optional[List[str]] = None) -> bool:
+        """
+        Mark Clips/Reels as seen using Instagram's Clips seen-state endpoint.
+
+        Parameters
+        ----------
+        media_ids: List[str]
+            Clip/Reel media ids or pks.
+        blend_media_ids: List[str], optional
+            Clip/Reel media ids or pks seen from Blend surfaces.
+
+        Returns
+        -------
+        bool
+            A boolean value
+        """
+        assert self.user_id, "Login required"
+        media_pks = [self.media_pk(media_id) for media_id in media_ids]
+        blend_media_pks = [self.media_pk(media_id) for media_id in (blend_media_ids or [])]
+        result = self.private_request(
+            "clips/write_seen_state/",
+            data={
+                "impressions": json.dumps(media_pks, separators=(",", ":")),
+                "_uid": str(self.user_id),
+                "_uuid": self.uuid,
+                "blend_impressions": json.dumps(blend_media_pks, separators=(",", ":")),
+            },
+        )
+        return result.get("status") == "ok"
+
     def clip_pin(self, media_pk: str, revert: bool = False) -> bool:
         """
         Pin Reel to the Reels tab/profile Reels grid
@@ -263,6 +293,22 @@ class UploadClipMixin:
             "clips/clips_info_for_creation/",
             params={"device_status": json.dumps(device_status)},
         )
+
+    def clip_interest_topics(self) -> List[Dict[str, object]]:
+        """
+        Get Reel topic catalog items accepted by ``clip_upload(..., topics=...)``.
+
+        Returns
+        -------
+        List[Dict]
+            Reel topic dictionaries, each including ``name`` and ``fit_id``.
+        """
+        result = self.private_request(
+            "interest_nux/list_all/",
+            params={"caller": "INTEREST_NUX"},
+            with_signature=False,
+        )
+        return result.get("sub_interests") or []
 
     def clip_trial_eligible(self) -> bool:
         """
@@ -618,6 +664,7 @@ class UploadClipMixin:
         fb_destination_audience_type: Optional[str] = None,
         fb_xpost_surface: str = "IG_REELS_COMPOSER",
         fb_validation_check_bypass: Optional[bool] = None,
+        topics: Optional[List[Union[str, int]]] = None,
     ) -> Media:
         """
         Upload CLIP to Instagram
@@ -660,6 +707,8 @@ class UploadClipMixin:
             Cross-posting surface reported by the Instagram app.
         fb_validation_check_bypass: bool, optional
             Override the validation bypass value from share_to_fb_config.
+        topics: List[str or int], optional
+            Reel topic ids to send as Instagram's ``interest_topics`` configure field.
 
         Returns
         -------
@@ -690,6 +739,8 @@ class UploadClipMixin:
                 "trial_params",
                 {"graduation_strategy": trial_graduation_strategy},
             )
+        if topics is not None:
+            configure_extra_data.setdefault("interest_topics", [str(topic) for topic in topics])
         duration_ms = str(int(duration * 1000))
         composer_session_id = str(uuid4())
         asset_id = uuid4().hex[:12].upper()
@@ -749,16 +800,18 @@ class UploadClipMixin:
         }
         upload_settings_data = json.dumps(upload_settings)
         upload_settings_len = str(len(upload_settings_data.encode("utf-8")))
-        headers = {
-            "Accept-Encoding": "gzip",
-            "Content-Type": "application/json",
-            "Content-Length": upload_settings_len,
-            "Offset": "0",
-            "X-Entity-Length": upload_settings_len,
-            "X-Entity-Name": "upload_settings",
-            "X-Entity-Type": "application/json",
-            "X_FB_VIDEO_WATERFALL_ID": f"{composer_session_id}_settings",
-        }
+        headers = self.private_headers(
+            {
+                "Accept-Encoding": "gzip",
+                "Content-Type": "application/json",
+                "Content-Length": upload_settings_len,
+                "Offset": "0",
+                "X-Entity-Length": upload_settings_len,
+                "X-Entity-Name": "upload_settings",
+                "X-Entity-Type": "application/json",
+                "X_FB_VIDEO_WATERFALL_ID": f"{composer_session_id}_settings",
+            }
+        )
         response = self.private.post(
             "https://{domain}/upload_settings/{session_id}".format(
                 domain=config.API_DOMAIN,
@@ -789,14 +842,16 @@ class UploadClipMixin:
             "session_id": upload_id,
             "media_type": "2",
         }
-        headers = {
-            "Accept-Encoding": "gzip",
-            "X-Instagram-Rupload-Params": json.dumps(rupload_params),
-            "X_FB_VIDEO_WATERFALL_ID": f"{composer_session_id}_{asset_id}_Mixed_0",
-            "X-Entity-Type": "video/mp4",
-            "Segment-Start-Offset": "0",
-            "Segment-Type": "3",
-        }
+        headers = self.private_headers(
+            {
+                "Accept-Encoding": "gzip",
+                "X-Instagram-Rupload-Params": json.dumps(rupload_params),
+                "X_FB_VIDEO_WATERFALL_ID": f"{composer_session_id}_{asset_id}_Mixed_0",
+                "X-Entity-Type": "video/mp4",
+                "Segment-Start-Offset": "0",
+                "Segment-Type": "3",
+            }
+        )
         response = self.private.get(
             "https://{domain}/rupload_igvideo/{name}".format(domain=config.API_DOMAIN, name=upload_name),
             headers=headers,

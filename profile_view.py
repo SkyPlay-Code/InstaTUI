@@ -1,13 +1,17 @@
 # profile_view.py
+import os
+import subprocess
 from io import BytesIO
+
 import requests
 from PIL import Image
-from textual.widgets import Input, LoadingIndicator, Label, Static, Button
-from textual.containers import VerticalScroll, Horizontal, Vertical
 from textual import work
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, Input, Label, LoadingIndicator, Static
+
 
 class ProfileView(VerticalScroll):
-    """The Component that searches and interacts with an Instagram Profile."""
+    """The Component that searches, displays, and interacts with an Instagram Profile."""
 
     def compose(self):
         yield Input(placeholder="🔍 Enter username to search...", id="profile-search")
@@ -20,11 +24,12 @@ class ProfileView(VerticalScroll):
                     yield Label("", id="profile-username")
                     yield Label("", id="profile-fullname")
                     yield Label("", id="profile-counters")
+                    # --- NEW: View HD Avatar Button ---
+                    yield Button("👁️ View HD Avatar", id="btn-view-avatar", variant="primary")
             
             yield Label("", id="profile-bio")
             yield Label("", id="profile-footer")
             
-            # --- NEW: Action Buttons Row ---
             with Horizontal(id="profile-actions"):
                 yield Button("👤 Follow", id="btn-follow", variant="success")
                 yield Button("🚫 Unfollow", id="btn-unfollow", variant="error")
@@ -32,7 +37,8 @@ class ProfileView(VerticalScroll):
     def on_mount(self):
         self.query_one("#profile-loading").display = False
         self.query_one("#profile-card").display = False
-        self.current_target_id = None # Store the user ID so we can follow them!
+        self.current_target_id = None 
+        self.current_pic_url = None # Caches the URL for HD rendering
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "profile-search":
@@ -47,9 +53,7 @@ class ProfileView(VerticalScroll):
         cl = self.app.ig_client
         try:
             user_info = cl.user_info_by_username(username)
-            # Fetch relationship status (Checks if YOU follow THEM)
             friendship = cl.user_friendship_v1(user_info.pk)
-            
             self.app.call_from_thread(self.display_profile, user_info, friendship)
         except Exception as e:
             self.app.call_from_thread(self.app.notify, f"Error: {e}", severity="error")
@@ -65,12 +69,12 @@ class ProfileView(VerticalScroll):
         followers = getattr(user, 'follower_count', 0)
         following = getattr(user, 'following_count', 0)
         posts = getattr(user, 'media_count', 0)
+        self.current_pic_url = getattr(user, 'profile_pic_url', None)
 
         badges = ""
         if getattr(user, 'is_verified', False): badges += "[blue]☑ Verified[/blue] "
         if getattr(user, 'is_private', False): badges += "[red]🔒 Private[/red] "
         
-        # Check Friendship Status!
         if getattr(friendship, 'followed_by', False):
             badges += "[green]✦ Follows You[/green] "
 
@@ -81,13 +85,20 @@ class ProfileView(VerticalScroll):
         )
         self.query_one("#profile-bio", Label).update(f"\n📝 [b]Bio:[/b]\n{bio}")
         
-        if getattr(user, 'profile_pic_url', None):
-            self.render_terminal_image(user.profile_pic_url)
+        link = getattr(user, 'external_url', None)
+        if link:
+            self.query_one("#profile-footer", Label).update(f"\n🔗 [blue u]{link}[/]")
+        else:
+            self.query_one("#profile-footer", Label).update("")
+
+        if self.current_pic_url:
+            self.render_terminal_image(self.current_pic_url)
+        else:
+            self.query_one("#profile-pic-container", Static).update("[No Picture]")
 
         self.query_one("#profile-card").display = True
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handles the Follow / Unfollow actions!"""
         if not self.current_target_id:
             return
 
@@ -98,6 +109,42 @@ class ProfileView(VerticalScroll):
         elif event.button.id == "btn-unfollow":
             self.app.notify("Unfollowing...")
             self.trigger_action("unfollow", self.current_target_id)
+
+        # --- NEW: View HD Avatar Action ---
+        elif event.button.id == "btn-view-avatar":
+            if self.current_pic_url:
+                self.app.notify("Downloading HD profile picture...")
+                self.play_avatar_in_terminal(self.current_pic_url)
+
+    @work(thread=True)
+    def play_avatar_in_terminal(self, url):
+        path = None
+        try:
+            resp = requests.get(url, timeout=5)
+            filename = f"avatar_cache_{self.current_target_id}.jpg"
+            path = os.path.join(".", filename)
+            
+            with open(path, 'wb') as f:
+                f.write(resp.content)
+                
+            with self.app.suspend():
+                print("\033[2J\033[H", end="") 
+                print(f"🚀 VIEWING AVATAR (Press 'q' to return)")
+                print("-" * 50)
+                
+                # Check global quality toggle setting!
+                is_hd = getattr(self.app, 'media_quality', 'lowq') == 'hd'
+                vo_driver = "sixel" if is_hd else "tct"
+                
+                # MPV loads our local image perfectly inside the terminal!
+                cmd = f'mpv --vo={vo_driver} --quiet --image-display-duration=inf "{path}"'
+                subprocess.run(cmd, shell=True)
+                
+        except Exception as e:
+            self.app.call_from_thread(self.app.notify, f"Error: {e}", severity="error")
+        finally:
+            if path and os.path.exists(path):
+                os.remove(path)
 
     @work(thread=True)
     def trigger_action(self, action, user_id):
@@ -113,12 +160,16 @@ class ProfileView(VerticalScroll):
 
     @work(thread=True)
     def render_terminal_image(self, url):
-        # [ KEEP YOUR EXISTING RENDER LOGIC HERE EXACTLY AS IT WAS BEFORE ]
+        """Generates inline block-art. Resolution increases if HD mode is toggled!"""
         try:
             resp = requests.get(url, timeout=5)
             img = Image.open(BytesIO(resp.content)).convert("RGB")
             
-            target_width = 36 
+            # --- NEW: Dynamic Resolution Toggling ---
+            # If globally set to HD, double the inline ANSI resolution!
+            is_hd = getattr(self.app, 'media_quality', 'lowq') == 'hd'
+            target_width = 48 if is_hd else 28 
+            
             w, h = img.size
             ratio = h / w
             target_height = int(target_width * ratio / 2) 

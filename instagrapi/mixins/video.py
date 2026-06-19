@@ -16,6 +16,7 @@ from instagrapi.exceptions import (
     VideoConfigureStoryError,
     VideoNotUpload,
 )
+from instagrapi.story import StoryBuilder
 from instagrapi.types import (
     DirectMessage,
     Location,
@@ -27,12 +28,14 @@ from instagrapi.types import (
     StoryMedia,
     StoryMention,
     StoryPoll,
+    StoryResizeMode,
     StorySticker,
     Track,
     Usertag,
 )
 from instagrapi.utils.serialization import dumps
 from instagrapi.utils.timing import date_time_original
+from instagrapi.utils.upload import with_coauthor_user_ids
 from instagrapi.utils.video import MOVIEPY_2_INSTALL_MESSAGE, analyze_video_for_upload
 
 
@@ -438,6 +441,7 @@ class UploadVideoMixin:
         location: Location = None,
         extra_data: Dict[str, str] = {},
         schedule_at: Optional[Union[int, datetime]] = None,
+        coauthor_user_ids: Optional[List[Union[int, str]]] = None,
     ) -> Media:
         """
         Upload video and configure to feed
@@ -458,6 +462,8 @@ class UploadVideoMixin:
             Dict of extra data, if you need to add your params, like {"share_to_facebook": 1}.
         schedule_at: int or datetime, optional
             Unix timestamp in seconds or datetime when the video should be published.
+        coauthor_user_ids: List[int | str], optional
+            Instagram user IDs to invite as post coauthors.
 
         Returns
         -------
@@ -467,6 +473,7 @@ class UploadVideoMixin:
         path = Path(path)
         if thumbnail is not None:
             thumbnail = Path(thumbnail)
+        extra_data = with_coauthor_user_ids(extra_data, coauthor_user_ids)
         extra_data = self._scheduled_extra_data(extra_data, schedule_at)
         upload_id, width, height, duration, thumbnail = self.video_rupload(path, thumbnail, to_story=False)
         for attempt in range(50):
@@ -611,6 +618,7 @@ class UploadVideoMixin:
         medias: List[StoryMedia] = [],
         polls: List[StoryPoll] = [],
         extra_data: Dict[str, str] = {},
+        resize_mode: StoryResizeMode = "fill",
     ) -> Story:
         """
         Upload video as a story and configure it
@@ -639,6 +647,8 @@ class UploadVideoMixin:
             List of polls to be included on this upload, default is empty list.
         extra_data: Dict[str, str], optional
             Dict of extra data, if you need to add your params, like {"share_to_facebook": 1}.
+        resize_mode: str, optional
+            Story resize mode: "fill" keeps current upload behavior, "fit" renders a Story canvas without cropping.
 
         Returns
         -------
@@ -648,56 +658,75 @@ class UploadVideoMixin:
         path = Path(path)
         if thumbnail is not None:
             thumbnail = Path(thumbnail)
-        upload_id, width, height, duration, thumbnail = self.video_rupload(path, thumbnail, to_story=True)
-        previous_story_ids = self._current_story_ids()
-        story_kwargs = {
-            "links": links,
-            "mentions": mentions,
-            "hashtags": hashtags,
-            "locations": locations,
-            "stickers": stickers,
-            "medias": medias,
-            "polls": polls,
-        }
-        for attempt in range(50):
-            self.logger.debug(f"Attempt #{attempt} to configure Video: {path}")
-            time.sleep(3)
-            try:
-                configured = self.video_configure_to_story(
-                    upload_id,
-                    width,
-                    height,
-                    duration,
-                    thumbnail,
-                    caption,
-                    mentions,
-                    locations,
-                    links,
-                    hashtags,
-                    stickers,
-                    medias,
-                    polls,
-                    extra_data=extra_data,
-                )
-            except Exception as e:
-                if "Transcode not finished yet" in str(e):
-                    """
-                    Response 202 status:
-                    {"message": "Transcode not finished yet.", "status": "fail"}
-                    """
-                    time.sleep(10)
-                    continue
-                raise e
-            if configured:
-                self.expose()
-                return self._extract_configured_story_or_recent(
-                    configured,
-                    VideoConfigureStoryError,
-                    "Video story upload",
-                    previous_story_ids,
-                    story_kwargs,
-                )
-        raise VideoConfigureStoryError(response=self.last_response, **self.last_json)
+        if resize_mode not in {"fill", "fit"}:
+            raise ValueError('resize_mode must be "fill" or "fit"')
+        rendered_story = None
+        upload_path = path
+        upload_thumbnail = thumbnail
+        try:
+            if resize_mode == "fit":
+                rendered_story = StoryBuilder(path).video_fit()
+                upload_path = Path(rendered_story.path)
+                upload_thumbnail = None
+            upload_id, width, height, duration, thumbnail = self.video_rupload(
+                upload_path,
+                upload_thumbnail,
+                to_story=True,
+            )
+            previous_story_ids = self._current_story_ids()
+            story_kwargs = {
+                "links": links,
+                "mentions": mentions,
+                "hashtags": hashtags,
+                "locations": locations,
+                "stickers": stickers,
+                "medias": medias,
+                "polls": polls,
+            }
+            for attempt in range(50):
+                self.logger.debug(f"Attempt #{attempt} to configure Video: {path}")
+                time.sleep(3)
+                try:
+                    configured = self.video_configure_to_story(
+                        upload_id,
+                        width,
+                        height,
+                        duration,
+                        thumbnail,
+                        caption,
+                        mentions,
+                        locations,
+                        links,
+                        hashtags,
+                        stickers,
+                        medias,
+                        polls,
+                        extra_data=extra_data,
+                    )
+                except Exception as e:
+                    if "Transcode not finished yet" in str(e):
+                        """
+                        Response 202 status:
+                        {"message": "Transcode not finished yet.", "status": "fail"}
+                        """
+                        time.sleep(10)
+                        continue
+                    raise e
+                if configured:
+                    self.expose()
+                    return self._extract_configured_story_or_recent(
+                        configured,
+                        VideoConfigureStoryError,
+                        "Video story upload",
+                        previous_story_ids,
+                        story_kwargs,
+                    )
+            raise VideoConfigureStoryError(response=self.last_response, **self.last_json)
+        finally:
+            if rendered_story:
+                for item in [rendered_story.path, *rendered_story.paths, f"{rendered_story.path}.jpg"]:
+                    with contextlib.suppress(OSError):
+                        Path(item).unlink()
 
     def video_upload_to_story_with_music(
         self,

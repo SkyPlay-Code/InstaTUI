@@ -1,9 +1,11 @@
 # reels_view.py
 import os
 import subprocess
-from textual.widgets import OptionList, LoadingIndicator, Label, Button
-from textual.containers import Vertical, Horizontal
+
 from textual import work
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Button, Label, LoadingIndicator, OptionList
+
 
 class ReelsView(Vertical):
     """The Ultimate Native Reels Feed Component based on your exact source."""
@@ -97,15 +99,18 @@ class ReelsView(Vertical):
         cl = self.app.ig_client
         path = None
         try:
-            # Based on your `clip.py` source dump, we invoke it directly:
             path = cl.clip_download(media_pk, folder=".")
-            
             with self.app.suspend():
                 print("\033[2J\033[H", end="") 
                 print(f"🚀 PLAYING REEL BY @{author.upper()} (Press 'q' when finished)")
                 print("-" * 50)
-                subprocess.run(["mpv", "--vo=tct", "--quiet", str(path)])
                 
+                # Sixel vs TCT
+                is_hd = getattr(self.app, 'media_quality', 'lowq') == 'hd'
+                vo_driver = "sixel" if is_hd else "tct"
+                
+                cmd = f'mpv --vo={vo_driver} --quiet "{path}"'
+                subprocess.run(cmd, shell=True)
         except Exception as e:
             self.app.call_from_thread(self.app.notify, f"Playback Error: {e}", severity="error")
         finally:

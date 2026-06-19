@@ -1,13 +1,15 @@
 # chat_screen.py
 import os
-import requests
-from io import BytesIO
-from PIL import Image
 import subprocess
-from textual.screen import Screen
-from textual.widgets import Input, Button, Label, LoadingIndicator, Static
-from textual.containers import VerticalScroll, Horizontal, Vertical
+from io import BytesIO
+
+import requests
+from PIL import Image
 from textual import work
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import Screen
+from textual.widgets import Button, Input, Label, LoadingIndicator, Static
+
 
 class ChatScreen(Screen):
     def __init__(self, thread, **kwargs):
@@ -184,12 +186,43 @@ class ChatScreen(Screen):
                 self.app.call_from_thread(self.app.notify, "✅ Message unsent.")
         except: pass
 
+    @work(thread=True)
+    def play_reel_from_url(self, url):
+            cl = self.app.ig_client
+            path = None
+            try:
+                media_pk = cl.media_pk_from_url(url)
+                path = cl.video_download(media_pk, folder=".")
+                with self.app.suspend():
+                    print("\033[2J\033[H", end="") 
+                    print("🚀 PLAYING REEL LINK (Press 'q' when finished)")
+                    print("-" * 50)
+                    
+                    # Sixel vs TCT
+                    is_hd = getattr(self.app, 'media_quality', 'lowq') == 'hd'
+                    vo_driver = "sixel" if is_hd else "tct"
+                    
+                    cmd = f'mpv --vo={vo_driver} --quiet "{path}"'
+                    subprocess.run(cmd, shell=True)
+            except Exception as e:
+                self.app.call_from_thread(self.app.notify, f"Player error: {e}", severity="error")
+            finally:
+                if path and os.path.exists(path):
+                    os.remove(path)
+    
     def launch_mpv_video(self, url):
-        """No download needed for direct API URLs, mpv handles them instantly."""
+        """Plays raw video message URLs using the configured terminal driver."""
         with self.app.suspend():
             print("\033[2J\033[H", end="") 
-            print("🚀 PLAYING CHAT MEDIA IN TCT (Press 'q' to return)")
-            subprocess.run(["mpv", "--vo=tct", "--quiet", str(url)])
+            print("🚀 PLAYING CHAT MEDIA (Press 'q' to return)")
+            print("-" * 50)
+            
+            # Sixel vs TCT
+            is_hd = getattr(self.app, 'media_quality', 'lowq') == 'hd'
+            vo_driver = "sixel" if is_hd else "tct"
+            
+            cmd = f'mpv --vo={vo_driver} --quiet "{url}"'
+            subprocess.run(cmd, shell=True)
 
     @work(thread=True)
     def render_chat_image(self, url, msg_id):

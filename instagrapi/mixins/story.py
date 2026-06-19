@@ -511,7 +511,51 @@ class StoryMixin:
             viewers = viewers[:amount]
         return viewers
 
-    def story_like(self, story_id: str, revert: bool = False) -> bool:
+    def story_likers_chunk(self, story_pk: int, max_amount: int = 0, max_id: str = "") -> tuple[list[UserShort], str]:
+        unique_set: set[str] = set()
+        likers: list[UserShort] = []
+        story_pk = self.media_pk(story_pk)
+        params = {"supported_capabilities_new": json.dumps(config.SUPPORTED_CAPABILITIES)}
+
+        while True:
+            if max_id:
+                params["max_id"] = max_id
+            result = self.private_request(f"media/{story_pk}/list_reel_media_viewer/", params=params)
+            for item in result.get("viewers") or []:
+                if not item.get("has_liked"):
+                    continue
+                liker = extract_user_short(item["user"])
+                if liker.pk in unique_set:
+                    continue
+                unique_set.add(liker.pk)
+                likers.append(liker)
+
+            max_id = result.get("next_max_id")
+            if not max_id or (max_amount and len(likers) >= max_amount):
+                break
+        return likers, max_id
+
+    def story_likers(self, story_pk: int, amount: int = 0) -> List[UserShort]:
+        """
+        List of story likers (Private API)
+
+        Parameters
+        ----------
+        story_pk: int
+        amount: int, optional
+            Maximum number of story likers
+
+        Returns
+        -------
+        List[UserShort]
+            A list of objects of UserShort
+        """
+        likers, _ = self.story_likers_chunk(story_pk, amount)
+        if amount:
+            likers = likers[:amount]
+        return likers
+
+    def story_like(self, story_id: str, revert: bool = False, mark_seen: bool = True) -> bool:
         """
         Like a story
 
@@ -521,6 +565,8 @@ class StoryMixin:
             Unique identifier of a Story
         revert: bool, optional
             If liked, whether or not to unlike. Default is False
+        mark_seen: bool, optional
+            Mark story as seen before liking. Default is True
 
         Returns
         -------
@@ -529,6 +575,8 @@ class StoryMixin:
         """
         assert self.user_id, "Login required"
         media_id = self.media_id(story_id)
+        if mark_seen and not revert:
+            self.story_seen([self.media_pk(media_id)])
         data = {
             "media_id": media_id,
             "_uid": str(self.user_id),
@@ -556,6 +604,39 @@ class StoryMixin:
             A boolean value
         """
         return self.story_like(story_id, revert=True)
+
+    def story_poll_vote(self, story_id: str, poll_id: str, vote: int) -> bool:
+        """
+        Vote in a story poll
+
+        Parameters
+        ----------
+        story_id: str
+            Unique identifier of a Story
+        poll_id: str
+            Unique identifier of a story poll sticker
+        vote: int
+            Poll option index, starting from 0
+
+        Returns
+        -------
+        bool
+            A boolean value
+        """
+        assert self.user_id, "Login required"
+        if not isinstance(vote, int) or vote < 0:
+            raise ValueError("vote must be a non-negative option index")
+        media_id = self.media_id(story_id)
+        data = {
+            "_uid": str(self.user_id),
+            "_csrftoken": self.token,
+            "vote": str(vote),
+        }
+        result = self.private_request(
+            f"media/{media_id}/{poll_id}/story_poll_vote/",
+            self.with_action_data(data),
+        )
+        return result["status"] == "ok"
 
     def sticker_tray(self) -> dict:
         """
