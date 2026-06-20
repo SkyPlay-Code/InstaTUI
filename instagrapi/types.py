@@ -469,6 +469,47 @@ class ClipsMetadata(TypesBaseModel):
     viewer_interaction_settings: Optional[dict] = None
 
 
+class MediaDimensions(TypesBaseModel):
+    height: Optional[int] = None
+    width: Optional[int] = None
+
+
+class MediaDashInfo(TypesBaseModel):
+    is_dash_eligible: Optional[bool] = False
+    video_dash_manifest: Optional[str] = None
+    number_of_qualities: Optional[int] = 0
+
+
+class ClipsMusicAttributionInfo(TypesBaseModel):
+    artist_name: Optional[str] = None
+    song_name: Optional[str] = None
+    uses_original_audio: Optional[bool] = None
+    should_mute_audio: Optional[bool] = None
+    should_mute_audio_reason: Optional[str] = None
+    audio_id: Optional[str] = None
+
+
+class MediaInlineComment(TypesBaseModel):
+    pk: str
+    text: str
+    user: UserShort
+    created_at_utc: datetime
+    has_liked: Optional[bool] = None
+    like_count: Optional[int] = None
+    replied_to_comment_id: Optional[str] = None
+    did_report_as_spam: Optional[bool] = None
+    is_restricted_pending: Optional[bool] = None
+    replies_count: Optional[int] = 0
+    replies: List["MediaInlineComment"] = []
+
+
+class MediaCommentsPreview(TypesBaseModel):
+    count: Optional[int] = 0
+    has_next_page: Optional[bool] = False
+    end_cursor: Optional[str] = None
+    comments: List[MediaInlineComment] = []
+
+
 class Media(TypesBaseModel):
     pk: Union[str, int]
     id: str
@@ -486,9 +527,22 @@ class Media(TypesBaseModel):
     like_count: int
     play_count: Optional[int] = None
     has_liked: Optional[bool] = None
+    caption_is_edited: Optional[bool] = False
+    dimensions: Optional[MediaDimensions] = None
+    has_audio: Optional[bool] = False
+    like_and_view_counts_disabled: Optional[bool] = False
+    viewer_can_reshare: Optional[bool] = False
+    viewer_has_saved: Optional[bool] = False
+    is_paid_partnership: Optional[bool] = False
+    is_affiliate: Optional[bool] = False
+    dash_info: Optional[MediaDashInfo] = None
+    clips_music_attribution_info: Optional[ClipsMusicAttributionInfo] = None
+    comments_preview: Optional[MediaCommentsPreview] = None
+    hoisted_comments: List[MediaInlineComment] = []
     caption_text: str
     accessibility_caption: Optional[str] = None
     usertags: List[Usertag]
+    coauthor_producers: List[UserShort] = []
     sponsor_tags: List[UserShort]
     video_url: Optional[HttpUrl] = None  # for Video and IGTV
     view_count: Optional[int] = 0  # for Video and IGTV
@@ -500,7 +554,7 @@ class Media(TypesBaseModel):
 
 class MediaXma(TypesBaseModel):
     # media_type: int
-    video_url: HttpUrl  # for Video and IGTV
+    video_url: str  # XMA target_url; can be http(s) or an Instagram deep link (instagram://)
     title: Optional[str] = ""
     preview_url: Optional[str] = None
     preview_url_mime_type: Optional[str] = None

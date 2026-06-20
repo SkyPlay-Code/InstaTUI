@@ -2,7 +2,7 @@ import json
 import logging
 from copy import deepcopy
 from json.decoder import JSONDecodeError
-from typing import Dict, List, Literal, Sequence, Tuple, Union
+from typing import Dict, Iterator, List, Literal, Optional, Sequence, Tuple, Union
 
 from requests.exceptions import RequestException
 
@@ -25,6 +25,7 @@ from instagrapi.extractors import (
     extract_user_v1,
 )
 from instagrapi.types import About, AddressBookContact, Guide, Relationship, RelationshipShort, User, UserShort
+from instagrapi.utils.iterators import iter_paginated
 from instagrapi.utils.serialization import dumps, json_value
 
 MAX_USER_COUNT = 200
@@ -34,11 +35,14 @@ USER_WEB_PROFILE_DOC_ID = "26762473490008061"
 USER_INFO_V2_DOC_ID = "25980296051578533"
 USER_INFO_BY_USERNAME_V2_DOC_ID = "26347858941511777"
 ADDRESS_BOOK_DEFAULT_INCLUDE = ("extra_display_name", "thumbnails")
+USER_REPORT_REASONS = {"spam": ("ig_report_account", "ig_its_inappropriate", "ig_spam_v3")}
 
 logger = logging.getLogger(__name__)
 
 INFO_FROM_MODULE = Literal["self_profile", "feed_timeline", "reel_feed_timeline"]
 FOLLOWERS_ORDER = Literal["date_followed_latest", "date_followed_earliest"]
+USER_REPORT_REASON = Literal["spam"]
+UserBlockSurface = Literal["profile", "direct_thread_info"]
 
 
 class UserMixin:
@@ -819,6 +823,36 @@ class UserMixin:
             users = users[:amount]
         return users
 
+    def iter_user_following_v1(
+        self,
+        user_id: str,
+        amount: int = 0,
+        page_size: int = MAX_USER_COUNT,
+    ) -> Iterator[UserShort]:
+        """
+        Iterate over user's following users by Private Mobile API.
+
+        Parameters
+        ----------
+        user_id: str
+            User id of an instagram account
+        amount: int, optional
+            Maximum number of users to yield, default is 0 - Inf
+        page_size: int, optional
+            Maximum number of users to fetch per page, default is 200
+
+        Returns
+        -------
+        Iterator[UserShort]
+            Iterator of UserShort objects
+        """
+        user_id = str(user_id)
+
+        def fetch_page(max_id: str, max_amount: int) -> Tuple[List[UserShort], str]:
+            return self.user_following_v1_chunk(user_id, max_amount=max_amount, max_id=max_id)
+
+        return iter_paginated(fetch_page, amount=amount, page_size=page_size, initial_cursor="")
+
     def user_following(self, user_id: str, use_cache: bool = True, amount: int = 0) -> Dict[str, UserShort]:
         """
         Get user's following information
@@ -932,7 +966,7 @@ class UserMixin:
         user_id: str,
         max_amount: int = 0,
         max_id: str = "",
-        order: FOLLOWERS_ORDER = None,
+        order: Optional[FOLLOWERS_ORDER] = None,
     ) -> Tuple[List[UserShort], str]:
         """
         Get user's followers information by Private Mobile API and max_id (cursor)
@@ -945,7 +979,7 @@ class UserMixin:
             Maximum number of media to return, default is 0 - Inf
         max_id: str, optional
             Max ID, default value is empty String
-        order: str, optional
+        order: FOLLOWERS_ORDER, optional
             Followers sort order: date_followed_latest or date_followed_earliest
 
         Returns
@@ -989,7 +1023,7 @@ class UserMixin:
         self,
         user_id: str,
         amount: int = 0,
-        order: FOLLOWERS_ORDER = None,
+        order: Optional[FOLLOWERS_ORDER] = None,
     ) -> List[UserShort]:
         """
         Get user's followers information by Private Mobile API
@@ -1000,7 +1034,7 @@ class UserMixin:
             User id of an instagram account
         amount: int, optional
             Maximum number of media to return, default is 0 - Inf
-        order: str, optional
+        order: FOLLOWERS_ORDER, optional
             Followers sort order: date_followed_latest or date_followed_earliest
 
         Returns
@@ -1012,6 +1046,46 @@ class UserMixin:
         if amount:
             users = users[:amount]
         return users
+
+    def iter_user_followers_v1(
+        self,
+        user_id: str,
+        amount: int = 0,
+        page_size: int = MAX_USER_COUNT,
+        order: Optional[FOLLOWERS_ORDER] = None,
+    ) -> Iterator[UserShort]:
+        """
+        Iterate over user's followers by Private Mobile API.
+
+        Parameters
+        ----------
+        user_id: str
+            User id of an instagram account
+        amount: int, optional
+            Maximum number of users to yield, default is 0 - Inf
+        page_size: int, optional
+            Maximum number of users to fetch per page, default is 200
+        order: FOLLOWERS_ORDER, optional
+            Followers sort order: date_followed_latest or date_followed_earliest
+
+        Returns
+        -------
+        Iterator[UserShort]
+            Iterator of UserShort objects
+        """
+        user_id = str(user_id)
+
+        def fetch_page(max_id: str, max_amount: int) -> Tuple[List[UserShort], str]:
+            if order:
+                return self.user_followers_v1_chunk(
+                    user_id,
+                    max_amount=max_amount,
+                    max_id=max_id,
+                    order=order,
+                )
+            return self.user_followers_v1_chunk(user_id, max_amount=max_amount, max_id=max_id)
+
+        return iter_paginated(fetch_page, amount=amount, page_size=page_size, initial_cursor="")
 
     @staticmethod
     def _private_graphql_root(data: Dict, root_field_name: str) -> Dict:
@@ -1032,7 +1106,7 @@ class UserMixin:
         max_amount: int = 0,
         max_id: str = None,
         rank_token: str = None,
-        order: FOLLOWERS_ORDER = None,
+        order: Optional[FOLLOWERS_ORDER] = None,
         priority: str = "u=3, i",
     ) -> Tuple[List[UserShort], str]:
         """
@@ -1048,7 +1122,7 @@ class UserMixin:
             The cursor from which it is worth continuing to receive the list of followers
         rank_token: str, optional
             Rank token for the follow list request. Defaults to client rank_token
-        order: str, optional
+        order: FOLLOWERS_ORDER, optional
             Followers sort order: date_followed_latest or date_followed_earliest
         priority: str, optional
             GraphQL request priority header captured from the Android app
@@ -1081,7 +1155,7 @@ class UserMixin:
         user_id: str,
         amount: int = 0,
         rank_token: str = None,
-        order: FOLLOWERS_ORDER = None,
+        order: Optional[FOLLOWERS_ORDER] = None,
         priority: str = "u=3, i",
     ) -> List[UserShort]:
         """
@@ -1095,7 +1169,7 @@ class UserMixin:
             Maximum number of users to return, default is 0 - Inf
         rank_token: str, optional
             Rank token for the follow list request. Defaults to client rank_token
-        order: str, optional
+        order: FOLLOWERS_ORDER, optional
             Followers sort order: date_followed_latest or date_followed_earliest
         priority: str, optional
             GraphQL request priority header captured from the Android app
@@ -1131,7 +1205,7 @@ class UserMixin:
         user_id: str,
         use_cache: bool = True,
         amount: int = 0,
-        order: FOLLOWERS_ORDER = None,
+        order: Optional[FOLLOWERS_ORDER] = None,
     ) -> Dict[str, UserShort]:
         """
         Get user's followers
@@ -1144,7 +1218,7 @@ class UserMixin:
             Whether or not to use information from cache, default value is True
         amount: int, optional
             Maximum number of media to return, default is 0 - Inf
-        order: str, optional
+        order: FOLLOWERS_ORDER, optional
             Followers sort order: date_followed_latest or date_followed_earliest.
             Sorted requests use the private mobile endpoint and bypass cache.
 
@@ -1379,7 +1453,7 @@ class UserMixin:
             self._users_following[self.user_id].pop(user_id, None)
         return result["friendship_status"]["following"] is False
 
-    def user_block(self, user_id: str, surface: str = "profile") -> bool:
+    def user_block(self, user_id: str, surface: UserBlockSurface = "profile") -> bool:
         """
         Block a User
 
@@ -1387,8 +1461,9 @@ class UserMixin:
         ----------
         user_id: str
             User ID of an Instagram account
-        surface: str, (optional)
-            Surface of block (deafult "profile", also can be "direct_thread_info")
+        surface: UserBlockSurface, optional
+            Surface used by Instagram for the block action, default "profile"; use
+            "direct_thread_info" from Direct thread info.
 
         Returns
         -------
@@ -1410,7 +1485,7 @@ class UserMixin:
 
         return result.get("friendship_status", {}).get("blocking") is True
 
-    def user_unblock(self, user_id: str, surface: str = "profile") -> bool:
+    def user_unblock(self, user_id: str, surface: UserBlockSurface = "profile") -> bool:
         """
         Unlock a User
 
@@ -1418,8 +1493,9 @@ class UserMixin:
         ----------
         user_id: str
             User ID of an Instagram account
-        surface: str, (optional)
-            Surface of block (deafult "profile", also can be "direct_thread_info")
+        surface: UserBlockSurface, optional
+            Surface used by Instagram for the unblock action, default "profile"; use
+            "direct_thread_info" from Direct thread info.
 
         Returns
         -------
@@ -1439,6 +1515,68 @@ class UserMixin:
         assert result.get("status", "") == "ok"
 
         return result.get("friendship_status", {}).get("blocking") is False
+
+    def user_report(self, user_id: str, reason: USER_REPORT_REASON = "spam") -> bool:
+        """
+        Report a User
+
+        Parameters
+        ----------
+        user_id: str
+            User ID of an Instagram account
+        reason: str, optional
+            Report reason. Currently supports ``"spam"``.
+
+        Returns
+        -------
+        bool
+            True if Instagram returns the report confirmation state
+        """
+        user_id = str(user_id)
+        if reason not in USER_REPORT_REASONS:
+            raise ValueError(
+                f'Unsupported user report reason "{reason}". Supported reasons: {tuple(USER_REPORT_REASONS)}'
+            )
+
+        result = self.private_request(
+            "reports/get_frx_prompt/",
+            data={
+                "_uuid": self.uuid,
+                "container_module": "profile",
+                "entry_point": "1",
+                "frx_prompt_request_type": "1",
+                "is_dark_mode": "false",
+                "location": "2",
+                "nua_action": "",
+                "object_id": user_id,
+                "object_type": "5",
+            },
+            with_signature=False,
+        )
+        response = result.get("response", result)
+        context = response.get("context")
+        if not context:
+            raise ClientError("Instagram report flow did not return an initial context", **result)
+
+        for tag in USER_REPORT_REASONS[reason]:
+            result = self.private_request(
+                "reports/get_frx_prompt/",
+                data={
+                    "_uuid": self.uuid,
+                    "context": context,
+                    "frx_prompt_request_type": "2",
+                    "is_dark_mode": "false",
+                    "nua_action": "",
+                    "selected_tag_types": dumps([tag]),
+                },
+                with_signature=False,
+            )
+            response = result.get("response", result)
+            context = response.get("context")
+            if not context:
+                raise ClientError(f'Instagram report flow did not return context after tag "{tag}"', **result)
+
+        return bool(response.get("follow_up_actions"))
 
     def user_remove_follower(self, user_id: str) -> bool:
         """
@@ -2191,7 +2329,7 @@ class UserMixin:
         client_doc_id: str = "28479704797510738576165798526",
         max_id: int = None,
         priority: str = None,
-        order: str = None,
+        order: Optional[FOLLOWERS_ORDER] = None,
         exclude_field_is_favorite: bool = None,
         exclude_unused_fields: bool = None,
     ) -> dict:
@@ -2237,7 +2375,7 @@ class UserMixin:
         client_doc_id: str = "161046392817718486717479294775",
         max_id: int = None,
         priority: str = None,
-        order: str = None,
+        order: Optional[FOLLOWERS_ORDER] = None,
         exclude_field_is_favorite: bool = None,
         exclude_unused_fields: bool = None,
         skip_preview_hashtags: bool = True,

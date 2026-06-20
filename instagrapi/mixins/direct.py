@@ -60,6 +60,7 @@ SEND_ATTRIBUTE_MEDIA = Literal[
     "feed_contextual_self_profile",
     "feed_contextual_profile",
 ]
+DirectMediaType = Literal["photo", "video"]
 BOX = Literal["general", "primary"]
 
 
@@ -77,8 +78,8 @@ class DirectMixin:
     def direct_threads(
         self,
         amount: int = 20,
-        selected_filter: SELECTED_FILTER = "",
-        box: BOX = "",
+        selected_filter: Optional[SELECTED_FILTER] = None,
+        box: Optional[BOX] = None,
         thread_message_limit: Optional[int] = None,
     ) -> List[DirectThread]:
         """
@@ -89,9 +90,9 @@ class DirectMixin:
         amount: int, optional
             Maximum number of media to return, default is 20
         selected_filter: str, optional
-            Filter to apply to threads (flagged or unread)
+            Filter to apply to threads ("flagged" or "unread")
         box: str, optional
-            Box to gather threads from (primary or general) (business accounts only)
+            Box to gather threads from ("primary" or "general") (business accounts only)
         thread_message_limit: int, optional
             Thread message limit, deafult is 10
 
@@ -117,8 +118,8 @@ class DirectMixin:
 
     def direct_threads_chunk(
         self,
-        selected_filter: SELECTED_FILTER = "",
-        box: BOX = "",
+        selected_filter: Optional[SELECTED_FILTER] = None,
+        box: Optional[BOX] = None,
         thread_message_limit: Optional[int] = None,
         cursor: str = None,
     ) -> Tuple[List[DirectThread], str]:
@@ -128,11 +129,11 @@ class DirectMixin:
         Parameters
         ----------
         selected_filter: str, optional
-            Filter to apply to threads (flagged or unread)
+            Filter to apply to threads ("flagged" or "unread")
         thread_message_limit: int, optional
             Thread message limit, deafult is 10
         box: str, optional
-            Box to gather threads from (primary or general) (business accounts only)
+            Box to gather threads from ("primary" or "general") (business accounts only)
         cursor: str, optional
             Cursor from the previous chunk request
 
@@ -1136,7 +1137,7 @@ class DirectMixin:
         path: Path,
         user_ids: List[int] = [],
         thread_ids: List[int] = [],
-        content_type: str = "photo",
+        content_type: DirectMediaType = "photo",
     ) -> DirectMessage:
         """
         Send a direct file to list of users or threads
@@ -1680,8 +1681,8 @@ class DirectMixin:
         media_id: str,
         user_ids: List[int] = [],
         thread_ids: List[int] = [],
-        send_attribute: SEND_ATTRIBUTES_MEDIA = "feed_timeline",
-        media_type: str = "photo",
+        send_attribute: SEND_ATTRIBUTE_MEDIA = "feed_timeline",
+        media_type: DirectMediaType = "photo",
     ) -> DirectMessage:
         """
         Share a media to list of users
@@ -1694,7 +1695,7 @@ class DirectMixin:
             List of unique identifier of Users id (recipients)
         thread_ids: List[int]
             List of unique identifier of Direct thread id
-        send_attribute: str, optional
+        send_attribute: SEND_ATTRIBUTE_MEDIA, optional
             Sending option. Default is "feed_timeline"
         media_type: str, optional
             Type of the shared media. Default is "photo", also can be "video"

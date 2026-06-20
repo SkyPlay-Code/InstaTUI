@@ -14,7 +14,7 @@ from network_view import NetworkView
 from notes_view import NotesView
 from profile_view import ProfileView
 from reels_view import ReelsView
-
+from notification_view import NotificationView # <-- NEW IMPORT
 
 class DashboardScreen(Screen):
     """The Sidebar Dashboard layout."""
@@ -27,6 +27,7 @@ class DashboardScreen(Screen):
                 yield Label("🧭 NAVIGATION", id="sidebar-title")
                 with ListView(id="nav-list"):
                     yield ListItem(Label("📫 Inbox"), id="nav-inbox")
+                    yield ListItem(Label("🔔 Notifications"), id="nav-notifications") # <-- NEW ENTRY
                     yield ListItem(Label("📝 Notes"), id="nav-notes")
                     yield ListItem(Label("🌍 Explore"), id="nav-explore")
                     yield ListItem(Label("🕵️‍♂️ Profile"), id="nav-profile")
@@ -38,13 +39,14 @@ class DashboardScreen(Screen):
             # Right Content Panel
             with ContentSwitcher(initial="inbox-view", id="content-area"):
                 yield InboxView(id="inbox-view")
+                yield NotificationView(id="notification-view") # <-- NEW VIEW MOUNTED
                 yield NotesView(id="notes-view")
                 yield ExploreView(id="explore-view")
                 yield ProfileView(id="profile-view")
                 yield NetworkView(id="network-view")
                 yield ReelsView(id="reels-view")
                 yield AccountView(id="account-view")
-                yield ExtraView(id="extra-view") # Contains both Archiver and Ghost inside!
+                yield ExtraView(id="extra-view") 
                     
         yield Footer()
 
@@ -54,6 +56,7 @@ class DashboardScreen(Screen):
         
         nav_map = {
             "nav-inbox": "inbox-view",
+            "nav-notifications": "notification-view", # <-- NEW ROUTING
             "nav-notes": "notes-view",
             "nav-explore": "explore-view",
             "nav-profile": "profile-view",

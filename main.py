@@ -1,5 +1,6 @@
 # main.py
 import os
+import subprocess
 import threading
 
 from textual import work
@@ -12,9 +13,8 @@ from login_screen import LoginScreen
 
 
 class InstaTermApp(App):
-    """The Main App Controller with Sidebar & Quality Toggling."""
+    """The Main App Controller with Sidebar, Media Player, and Quality Toggling."""
 
-    # Add 't' key to toggle quality globally on the fly!
     BINDINGS = [
         ("q", "quit", "Quit App"),
         ("t", "toggle_quality", "Toggle Quality (TCT/HD)")
@@ -25,7 +25,7 @@ class InstaTermApp(App):
         "dashboard": DashboardScreen
     }
 
-    # Sidebar overhual CSS
+    # Fully merged and cleaned layout CSS
     CSS = """
     Screen { 
         align: center middle; 
@@ -96,15 +96,20 @@ class InstaTermApp(App):
         margin-top: 1; 
     }
 
-    /* Inbox Styles */
+    /* Containers Layout (Unified grouped rules) */
+    #inbox-container, #notification-container, #notes-container, #profile-card, #network-container, #reels-container, #account-container, #explore-container, #extra-container {
+        width: 100%;
+        height: 100%;
+        border: solid $secondary;
+        padding: 1;
+        background: $surface;
+    }
     #inbox-container { 
         width: 90%; 
-        height: 100%; 
-        border: solid $secondary; 
-        padding: 1; 
-        background: $surface; 
     }
-    #inbox-header { 
+    
+    /* Unified Header Layouts */
+    #inbox-header, #notification-header, #notif-header, #notes-header, #profile-username, #net-header, #reels-header, #account-header, #explore-header, #extra-header { 
         width: 100%; 
         text-align: center; 
         text-style: bold; 
@@ -113,11 +118,12 @@ class InstaTermApp(App):
         margin-bottom: 1; 
         color: $accent; 
     }
+    
     OptionList { 
         height: 1fr; 
         border: blank; 
     }
-    #refresh-inbox-btn { 
+    #refresh-inbox-btn, #refresh-notes-btn { 
         margin-bottom: 1; 
     }
 
@@ -197,9 +203,6 @@ class InstaTermApp(App):
     #profile-stats-container { 
         height: auto; 
         align-vertical: middle; 
-    }
-    #profile-username { 
-        margin-bottom: 1; 
     }
     #profile-counters { 
         color: $accent; 
@@ -294,6 +297,32 @@ class InstaTermApp(App):
         text-align: center; 
         margin-bottom: 1; 
     }
+    
+    /* Notifications & Settings Styles */
+    #notif-controls { 
+        margin-top: 1; 
+        margin-bottom: 1; 
+    }
+    #notif-controls Button { 
+        width: 1fr; 
+        margin-right: 1;
+    }
+    #notif-settings-panel { 
+        border: thick $warning; 
+        padding: 1; 
+        margin-bottom: 1; 
+        background: $background; 
+        height: auto;
+    }
+    #settings-title { 
+        text-style: bold; 
+        margin-bottom: 1; 
+        color: $warning; 
+    }
+    #settings-options-list { 
+        height: 10; 
+        margin-bottom: 1; 
+    }
     """
 
     def __init__(self):
@@ -301,7 +330,10 @@ class InstaTermApp(App):
         self.ig_client = Client()
         self.last_msg_id = None
         
-        # --- NEW: Global Quality Selector ("lowq" or "hd") ---
+        # Lock to prevent race conditions during concurrent API and polling requests
+        self.api_lock = threading.Lock()
+        
+        # Quality Selector ("lowq" or "hd")
         self.media_quality = "lowq"
         
         self.challenge_event = threading.Event()
@@ -312,43 +344,79 @@ class InstaTermApp(App):
         """The keybinding handler. Changes quality instantly with 't'!"""
         if self.media_quality == "lowq":
             self.media_quality = "hd"
-            # FIXED: Changed "info" to "information" for Textual compatibility!
-            self.notify("📺 Media Quality: HIGH-DEFINITION (Sixel Mode)", severity="information")
+            self.notify("📺 Media Quality: HIGH-DEFINITION (Sixel/Kitty Mode)", severity="information")
         else:
             self.media_quality = "lowq"
-            # FIXED: Changed "warning" severity check is native
             self.notify("📟 Media Quality: RETRO TCT (Terminal Blocks)", severity="warning")
 
+    # ==========================================
+    # 👑 RESTORED: THE UNIFIED MEDIA PLAYER PIPELINE
+    # ==========================================
+    def play_media_file(self, path: str, is_video: bool = True) -> None:
+        """Plays media using the strict quality priority chain inside the terminal."""
+        is_hd = self.media_quality == "hd"
+        vo_drivers = "kitty,sixel,gpu,tct" if is_hd else "tct"
+
+        # Safely structured array command prevents path spacing issues & shell injection
+        cmd = ["mpv", f"--vo={vo_drivers}", "--quiet", path]
+        if not is_video:
+            cmd.append("--image-display-duration=inf")
+
+        with self.suspend():
+            print("\033[2J\033[H", end="") 
+            print(f"🚀 IN-APP MEDIA PLAYER (Quality Mode: {self.media_quality.upper()})")
+            print("Press 'q' to close media and return to the TUI.")
+            print("-" * 50)
+            try:
+                subprocess.run(cmd)
+            except FileNotFoundError:
+                print("\n❌ Error: 'mpv' media player is not installed or not in PATH.")
+                print("Please install mpv to enable media rendering.")
+                input("\nPress Enter to return to the app...")
+            
+        self.refresh() # Always unfreeze the terminal cleanly!
+
     def gui_challenge_handler(self, username: str, choice=None) -> str:  # pyright: ignore[reportUnusedParameter]
+        """Signals background operations to wait while showing the challenge modal."""
         self.challenge_event.clear()
         self.call_from_thread(self.trigger_challenge_ui)
         self.challenge_event.wait() 
         return self.challenge_code
 
     def trigger_challenge_ui(self):
+        """Pushes challenge screen modal to prompt user for codes."""
         def callback(code):
-            self.challenge_code = code
+            self.challenge_code = code if code is not None else ""
             self.challenge_event.set()
             self.notify("Code submitted. Waiting for Instagram...", severity="warning")
         self.push_screen(ChallengeScreen(), callback)
 
     def on_mount(self):
         self.set_interval(30, self.poll_notifications)
+        self.load_initial_session()
+
+    @work(thread=True, exclusive=True)
+    def load_initial_session(self):
+        """Asynchronously loads the initial session file to prevent startup deadlocks."""
         if os.path.exists("session.json"):
             try:
-                self.ig_client.load_settings("session.json")
-                self.push_screen("dashboard")
+                with self.api_lock:
+                    self.ig_client.load_settings("session.json")
+                self.call_from_thread(self.push_screen, "dashboard")
             except Exception:
-                self.push_screen("login")
+                self.call_from_thread(self.push_screen, "login")
         else:
-            self.push_screen("login")
+            self.call_from_thread(self.push_screen, "login")
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True)
     def poll_notifications(self):
+        """Polls direct message updates concurrently and thread-safely."""
         if not getattr(self.ig_client, 'user_id', None):
             return 
         try:
-            threads = self.ig_client.direct_threads(amount=1)
+            with self.api_lock:
+                threads = self.ig_client.direct_threads(amount=1)
+                
             if threads and threads[0].messages:
                 latest_msg = threads[0].messages[0]
                 if self.last_msg_id is None:
@@ -359,9 +427,15 @@ class InstaTermApp(App):
                     if str(latest_msg.user_id) != str(self.ig_client.user_id):
                         sender = threads[0].thread_title or "Someone"
                         text = latest_msg.text if latest_msg.text else "📷 Media"
-                        self.app.call_from_thread(self.notify, text, title=f"New message from {sender}", severity="info")
+                        # FIXED: 'info' severity changed to 'information' to comply with Textual specifications
+                        self.call_from_thread(self.notify, text, title=f"New message from {sender}", severity="information")
         except Exception:
             pass
+
+    def on_unmount(self) -> None:
+        """Forces verification events to set, freeing lingering threads during app exit."""
+        self.challenge_event.set()
+
 
 if __name__ == "__main__":
     try:
