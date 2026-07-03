@@ -1,15 +1,25 @@
 # ghost_view.py
 import os
+import shutil
 import subprocess
+import sys
+import threading
+import time
 
 import requests
 from textual import work
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label, LoadingIndicator, OptionList
 
 
 class GhostView(Vertical):
     """Anonymously view 24h Stories and Profile Highlights."""
+
+    # Set up bindings so pressing 'q' shows in the footer/helps with navigation
+    BINDINGS = [
+        Binding("q", "quit_viewer", "Stop Player / Back to Menu", show=True),
+    ]
 
     def compose(self):
         with Vertical(id="ghost-container"):
@@ -51,6 +61,9 @@ class GhostView(Vertical):
         self.category_keys = []
         self.current_frames = []
 
+        # Track the active external player process so we can terminate it
+        self.current_player_process = None
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "ghost-target":
             self.query_one("#ghost-scan-btn").press()
@@ -72,7 +85,10 @@ class GhostView(Vertical):
 
         # Right Panel (Frames)
         elif event.option_list.id == "frame-list":
-            if not self.current_frames:
+            # FIXED: Avoid IndexError when selecting the "Folder is empty" message
+            if not self.current_frames or event.option_index >= len(
+                self.current_frames
+            ):
                 return
             selected_frame = self.current_frames[event.option_index]
             self.play_ghost_frame(selected_frame)
@@ -85,18 +101,23 @@ class GhostView(Vertical):
                 self.query_one("#ghost-header").update,
                 f"👻 Ghosting @{username} (Finding ID...)",
             )
-            user_id = cl.user_id_from_username(username)
+
+            # Wrapped API operations with the global thread lock
+            with self.app.api_lock:
+                user_id = cl.user_id_from_username(username)
 
             self.app.call_from_thread(
                 self.query_one("#ghost-header").update, "👻 Fetching 24h Stories..."
             )
-            active = cl.user_stories(user_id)
+            with self.app.api_lock:
+                active = cl.user_stories(user_id)
 
             self.app.call_from_thread(
                 self.query_one("#ghost-header").update,
                 "👻 Fetching Profile Highlights...",
             )
-            highlights = cl.user_highlights(user_id)
+            with self.app.api_lock:
+                highlights = cl.user_highlights(user_id)
 
             self.app.call_from_thread(self.display_categories, active, highlights)
 
@@ -158,8 +179,9 @@ class GhostView(Vertical):
                     "⏳ Opening Highlight Folder...",
                 )
 
-                # Fetch highlight content dynamically
-                full_hl = cl.highlight_info(hl.pk)
+                # Wrapped API interaction with the thread lock
+                with self.app.api_lock:
+                    full_hl = cl.highlight_info(hl.pk)
                 frames = getattr(full_hl, "items", [])
                 self.highlights_map[key] = full_hl
 
@@ -193,39 +215,112 @@ class GhostView(Vertical):
 
     @work(thread=True)
     def play_ghost_frame(self, story):
-        cl = self.app.ig_client
         path = None
         is_video = getattr(story, "media_type", 1) == 2
-
         try:
-            # Secure download bypasses standard Seen receipts
-            path = cl.story_download(story.pk, folder=".")
+            media_url = story.video_url if is_video else story.thumbnail_url
+            if not media_url:
+                raise ValueError("Story media URL is empty or unavailable.")
 
-            with self.app.suspend():
-                print("\033[2J\033[H", end="")
-                print(f"🚀 GHOST STORY VIEWER (Press 'q' to close media and return)")
-                print("-" * 50)
+            url = str(media_url).strip()
+            self.app.call_from_thread(
+                self.app.notify, "Stealth Downloading...", timeout=3
+            )
 
-                # Check current global quality setting
-                is_hd = getattr(self.app, "media_quality", "lowq") == "hd"
+            ext = ".mp4" if is_video else ".jpg"
+            path = os.path.join(".", f"ghost_cache_{story.pk}{ext}")
 
-                # 👑 Sixel vs TCT: Both render inside the terminal!
-                vo_driver = "sixel" if is_hd else "tct"
+            r = requests.get(url, stream=True, timeout=15)
+            r.raise_for_status()  # Ensure we download successfully before playing
 
-                if is_video:
-                    cmd = f'mpv --vo={vo_driver} --quiet "{path}"'
-                else:
-                    cmd = f'mpv --vo={vo_driver} --quiet --image-display-duration=inf "{path}"'
+            with open(path, "wb") as f:
+                for chunk in r.iter_content(2048):
+                    f.write(chunk)
 
-                subprocess.run(cmd, shell=True)
+            self.app.call_from_thread(self.app.notify, "Launching player...", timeout=2)
+
+            # Play directly in this background thread. This keeps the file intact
+            # while the player is open, keeping the Textual main thread fully responsive.
+            self._run_external_player(path, is_video)
 
         except Exception as e:
-            self.app.call_from_thread(
-                self.app.notify, f"Stealth View Error: {e}", severity="error"
-            )
+            self.app.call_from_thread(self.app.notify, f"Error: {e}", severity="error")
         finally:
             if path and os.path.exists(path):
-                os.remove(path)
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+    def _run_external_player(self, path, is_video):
+        """Launches an external player to display media, prioritizing robust CLI viewers."""
+        # Find available media player
+        candidates = (
+            ["mpv", "vlc", "ffplay"]
+            if is_video
+            else ["mpv", "feh", "sxiv", "viewnior", "display"]
+        )
+
+        chosen_player = None
+        for p in candidates:
+            if shutil.which(p):
+                chosen_player = p
+                break
+
+        try:
+            if chosen_player:
+                cmd = [chosen_player, path]
+                if chosen_player == "mpv":
+                    cmd.append("--title=Ghost Viewer")
+                    if not is_video:
+                        cmd.append(
+                            "--image-display-duration=inf"
+                        )  # Do not auto-close images
+
+                self.current_player_process = subprocess.Popen(cmd)
+                self.current_player_process.wait()
+            else:
+                # System-specific default fallback
+                if sys.platform.startswith("win"):
+                    os.startfile(path)
+                    # Because os.startfile is non-blocking, we sleep briefly
+                    # so the viewer can open the file before it is deleted.
+                    time.sleep(8)
+                elif sys.platform == "darwin":
+                    # Use -W flag to wait until the application is closed
+                    self.current_player_process = subprocess.Popen(["open", "-W", path])
+                    self.current_player_process.wait()
+                else:  # Linux
+                    self.current_player_process = subprocess.Popen(["xdg-open", path])
+                    time.sleep(8)
+        except Exception as e:
+            raise RuntimeError(f"Could not launch player: {e}")
+        finally:
+            self.current_player_process = None
+
+    def on_key(self, event) -> None:
+        """Intercepts key presses bubbling up from focused child lists."""
+        if event.key == "q":
+            event.stop()
+            self.action_quit_viewer()
+
+    def action_quit_viewer(self) -> None:
+        """Triggered by pressing 'q'. Terminates the active player, or returns to main menu."""
+        if self.current_player_process:
+            try:
+                self.current_player_process.terminate()
+                self.app.notify("Playback stopped.")
+            except Exception:
+                pass
+            self.current_player_process = None
+        else:
+            # Navigate back to your app's main menu/screen
+            if len(self.app.screen_stack) > 1:
+                self.app.pop_screen()
+            elif hasattr(self.app, "show_main_menu"):
+                self.app.show_main_menu()
+            else:
+                self.app.notify("Already at main menu / No back transition defined.")
 
     def reset_ui(self):
         self.query_one("#ghost-scan-btn").disabled = False

@@ -1,12 +1,12 @@
 # profile_view.py
-from io import BytesIO
 import os
+from io import BytesIO
 import requests
-import subprocess
 from PIL import Image
-from textual.widgets import Input, LoadingIndicator, Label, Static, Button
-from textual.containers import VerticalScroll, Horizontal, Vertical
 from textual import work
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, Input, Label, LoadingIndicator, Static
+
 
 class ProfileView(VerticalScroll):
     """The Component that searches, displays, and interacts with an Instagram Profile."""
@@ -37,6 +37,7 @@ class ProfileView(VerticalScroll):
         self.query_one("#profile-card").display = False
         self.current_target_id = None 
         self.current_pic_url = None # Caches the URL for HD rendering
+        self.raw_pic_url = None     # Fallback cache for raw CDN URL
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "profile-search":
@@ -44,24 +45,36 @@ class ProfileView(VerticalScroll):
             if username:
                 self.query_one("#profile-card").display = False
                 self.query_one("#profile-loading").display = True
+                # Remove active focus from the input field to enable navigation bindings
+                self.app.set_focus(None)
                 self.fetch_profile(username)
 
-    @work(thread=True)
-    def fetch_profile(self, username):
+    @work
+    async def fetch_profile(self, username):
         cl = self.app.ig_client
         try:
-            # 👑 RESOLUTION FIXED: Force the private Mobile API flow to extract authentic HD fields
-            user_info = cl.user_info_by_username_v1(username)
-            friendship = cl.user_friendship_v1(user_info.pk)
-            self.app.call_from_thread(self.display_profile, user_info, friendship)
+            import asyncio
+            loop = asyncio.get_running_loop()
+            
+            # Wrap block-level API calls into thread executor to keep the TUI loop active and snappy
+            def fetch_data():
+                with self.app.api_lock:
+                    user_info = cl.user_info_by_username_v1(username)
+                    friendship = cl.user_friendship_v1(user_info.pk)
+                return user_info, friendship
+
+            user_info, friendship = await loop.run_in_executor(None, fetch_data)
+            self.display_profile(user_info, friendship)
         except Exception as e:
-            self.app.call_from_thread(self.app.notify, f"Error: {e}", severity="error")
-            self.app.call_from_thread(self.hide_loading)
+            self.app.notify(f"Error: {e}", severity="error")
+            self.hide_loading()
 
     def hide_loading(self) -> None:
-        """Hides the loading indicator safely on the main thread."""
+        """Hides the loading indicator safely on the main thread and restores display state."""
         try:
             self.query_one("#profile-loading").display = False
+            if self.current_target_id:
+                self.query_one("#profile-card").display = True
         except Exception:
             pass
 
@@ -69,7 +82,6 @@ class ProfileView(VerticalScroll):
         """Safely upgrades low-resolution CDN path/query parameters to high-definition."""
         if not url:
             return url
-        # Swaps out known low-res path segments or URL parameters to request the HD asset
         for low_res in ["s150x150", "s240x240", "s320x320", "s480x480"]:
             if low_res in url:
                 url = url.replace(low_res, "s640x640")
@@ -86,9 +98,10 @@ class ProfileView(VerticalScroll):
         following = getattr(user, 'following_count', 0)
         posts = getattr(user, 'media_count', 0)
         
-        # Pull URL and run it through the dynamic upgrader
+        # Keep track of both raw and optimized URLs
         raw_hd_url = getattr(user, 'profile_pic_url_hd', None) or getattr(user, 'profile_pic_url', None)
-        self.current_pic_url = self.optimize_avatar_url(str(raw_hd_url)) if raw_hd_url else None
+        self.raw_pic_url = str(raw_hd_url) if raw_hd_url else None
+        self.current_pic_url = self.optimize_avatar_url(self.raw_pic_url) if self.raw_pic_url else None
 
         badges = ""
         if getattr(user, 'is_verified', False): badges += "[blue]☑ Verified[/blue] "
@@ -133,93 +146,116 @@ class ProfileView(VerticalScroll):
             if self.current_pic_url:
                 self.app.notify("Downloading HD profile picture...")
                 self.play_avatar_in_terminal(self.current_pic_url, self.current_target_id)
-
-    @work(thread=True)
-    def play_avatar_in_terminal(self, url, target_id):
-        """Downloads the image in a background worker thread."""
-        path = None
-        try:
-            resp = requests.get(url, timeout=10)
-            filename = f"avatar_cache_hd_{target_id}.jpg"
-            path = os.path.join(".", filename)
-            
-            with open(path, 'wb') as f:
-                f.write(resp.content) 
-                
-            # Delegate terminal suspension and mpv execution back to the main thread
-            self.app.call_from_thread(self.run_mpv_on_main, path)
-            
-        except Exception as e:
-            self.app.call_from_thread(self.app.notify, f"Error: {e}", severity="error")
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-
-    def run_mpv_on_main(self, path: str) -> None:
-        """Executes terminal suspension and mpv cleanly on the main thread."""
-        try:
-            with self.app.suspend():
-                print("\033[2J\033[H", end="") 
-                print(f"🚀 VIEWING AVATAR IN HIGH-DEFINITION (Press 'q' to return)")
-                print("-" * 50)
-                
-                is_hd = getattr(self.app, 'media_quality', 'lowq') == 'hd'
-                vo_drivers = "kitty,sixel,tct" if is_hd else "tct"
-                
-                cmd = f'mpv --vo={vo_drivers} --quiet --image-display-duration=inf "{path}"'
-                subprocess.run(cmd, shell=True)
-                
-            self.app.refresh() 
-            
-        except Exception as e:
-            self.app.notify(f"Viewer Error: {e}", severity="error")
-        finally:
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-
-    @work(thread=True)
-    def trigger_action(self, action, user_id):
-        try:
-            cl = self.app.ig_client
-            if action == "follow":
-                cl.user_follow(user_id)
             else:
-                cl.user_unfollow(user_id)
-            self.app.call_from_thread(self.app.notify, f"Successfully executed: {action}!")
-        except Exception as e:
-            self.app.call_from_thread(self.app.notify, f"Action failed: {e}", severity="error")
+                self.app.notify("No HD avatar URL available for this user.", severity="error")
 
-    @work(thread=True)
-    def render_terminal_image(self, url):
-        """Generates inline block-art from the HD original."""
+    # ==========================================
+    # 👑 MODERN ASYNC EVENT-LOOP WORKER (NO RAW OS THREADS)
+    # ==========================================
+    @work
+    async def play_avatar_in_terminal(self, url, target_id):
+        """Asynchronously handles downloads and initiates play activities on the main thread."""
         try:
-            resp = requests.get(url, timeout=5)
-            img = Image.open(BytesIO(resp.content)).convert("RGB")
+            import asyncio
+            loop = asyncio.get_running_loop()
             
-            is_hd = getattr(self.app, 'media_quality', 'lowq') == 'hd'
-            target_width = 44 if is_hd else 24 
+            # Fetch requests using loop executor to prevent UI freeze
+            async def download(download_url):
+                return await loop.run_in_executor(None, lambda: requests.get(download_url, timeout=10))
             
-            w, h = img.size
-            ratio = h / w
-            target_height = int(target_width * ratio / 2) 
+            try:
+                resp = await download(url)
+                resp.raise_for_status()
+            except Exception as e:
+                if self.raw_pic_url and url != self.raw_pic_url:
+                    self.app.notify("HD URL failed, trying standard resolution...", severity="warning")
+                    resp = await download(self.raw_pic_url)
+                    resp.raise_for_status()
+                else:
+                    raise e
+
+            # Using standard system temporary directory to guarantee absolute file write permissions
+            import tempfile
+            filename = f"avatar_cache_hd_{target_id}.jpg"
+            path = os.path.abspath(os.path.join(tempfile.gettempdir(), filename))
             
-            img = img.resize((target_width, target_height * 2), Image.Resampling.LANCZOS)
-            ascii_art = ""
-            for y in range(0, target_height * 2, 2):
-                line = ""
-                for x in range(target_width):
-                    r1, g1, b1 = img.getpixel((x, y))      
-                    r2, g2, b2 = img.getpixel((x, y + 1)) if y + 1 < target_height * 2 else (0, 0, 0)
-                    line += f"[#{r1:02x}{g1:02x}{b1:02x} on #{r2:02x}{g2:02x}{b2:02x}]▀[/]"
-                ascii_art += line + "\n"
-            self.app.call_from_thread(self.update_pic_container, ascii_art)
+            def write_file():
+                with open(path, 'wb') as f:
+                    f.write(resp.content)
+            
+            await loop.run_in_executor(None, write_file)
+            
+            # Request app to trigger GUI player
+            self.app.play_media_file(path, is_video=False, cleanup=True)
+            
         except Exception as e:
-            self.app.call_from_thread(self.update_pic_container, "[red]Img Failed[/red]")
+            self.app.notify(f"Error: {e}", severity="error")
+
+    @work
+    async def trigger_action(self, action, user_id):
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            
+            def make_call():
+                cl = self.app.ig_client
+                with self.app.api_lock:
+                    if action == "follow":
+                        cl.user_follow(user_id)
+                    else:
+                        cl.user_unfollow(user_id)
+
+            await loop.run_in_executor(None, make_call)
+            self.app.notify(f"Successfully executed: {action}!")
+        except Exception as e:
+            self.app.notify(f"Action failed: {e}", severity="error")
+
+    @work
+    async def render_terminal_image(self, url):
+        """Generates inline block-art from the HD original using async execution."""
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            
+            async def download():
+                return await loop.run_in_executor(None, lambda: requests.get(url, timeout=5))
+            
+            try:
+                resp = await download()
+                resp.raise_for_status()
+            except Exception as e:
+                if self.raw_pic_url and url != self.raw_pic_url:
+                    async def download_raw():
+                        return await loop.run_in_executor(None, lambda: requests.get(self.raw_pic_url, timeout=5))
+                    resp = await download_raw()
+                    resp.raise_for_status()
+                else:
+                    raise e
+
+            def process_image():
+                img = Image.open(BytesIO(resp.content)).convert("RGB")
+                is_hd = getattr(self.app, 'media_quality', 'lowq') == 'hd'
+                target_width = 44 if is_hd else 24 
+                
+                w, h = img.size
+                ratio = h / w
+                target_height = int(target_width * ratio / 2) 
+                
+                img = img.resize((target_width, target_height * 2), Image.Resampling.LANCZOS)
+                ascii_art = ""
+                for y in range(0, target_height * 2, 2):
+                    line = ""
+                    for x in range(target_width):
+                        r1, g1, b1 = img.getpixel((x, y))      
+                        r2, g2, b2 = img.getpixel((x, y + 1)) if y + 1 < target_height * 2 else (0, 0, 0)
+                        line += f"[#{r1:02x}{g1:02x}{b1:02x} on #{r2:02x}{g2:02x}{b2:02x}]▀[/]"
+                    ascii_art += line + "\n"
+                return ascii_art
+
+            ascii_art = await loop.run_in_executor(None, process_image)
+            self.update_pic_container(ascii_art)
+        except Exception:
+            self.update_pic_container("[red]Img Failed[/red]")
 
     def update_pic_container(self, ascii_art: str) -> None:
         """Safely updates the picture container on the main thread."""

@@ -67,7 +67,7 @@ class NotificationView(Vertical):
     def fetch_notifications(self):
         cl = self.app.ig_client
         # Toggle loading state on the main thread safely
-        self.call_from_thread(self.set_ui_loading, True)
+        self.app.call_from_thread(self.set_ui_loading, True)
         try:
             # Native news_inbox_v1 API
             response = cl.news_inbox_v1(mark_as_seen=True)
@@ -76,16 +76,16 @@ class NotificationView(Vertical):
             old_stories = response.get("old_stories", [])
             all_stories = new_stories + old_stories
             
-            self.call_from_thread(self.display_notifications, all_stories)
+            self.app.call_from_thread(self.display_notifications, all_stories)
         except Exception as e:
-            self.call_from_thread(self.app.notify, f"Feed Error: {e}", severity="error")
-            self.call_from_thread(self.set_ui_loading, False)
+            self.app.call_from_thread(self.app.notify, f"Feed Error: {e}", severity="error")
+            self.app.call_from_thread(self.set_ui_loading, False)
 
     @work(thread=True)
     def apply_push_rule(self, index):
         cl = self.app.ig_client
         try:
-            self.call_from_thread(self.app.notify, "Sending push rule to Instagram...")
+            self.app.call_from_thread(self.app.notify, "Sending push rule to Instagram...")
             
             if index == 0:
                 cl.notification_mute_all("1_hour")
@@ -102,11 +102,11 @@ class NotificationView(Vertical):
             elif index == 6:
                 cl.notification_comments("off")
                 
-            self.call_from_thread(self.app.notify, "✅ Push Settings Updated!")
+            self.app.call_from_thread(self.app.notify, "✅ Push Settings Updated!")
             # Triggers helper method on the main thread to avoid unsafe evaluation
-            self.call_from_thread(self.close_settings_ui)
+            self.app.call_from_thread(self.close_settings_ui)
         except Exception as e:
-            self.call_from_thread(self.app.notify, f"Settings Error: {e}", severity="error")
+            self.app.call_from_thread(self.app.notify, f"Settings Error: {e}", severity="error")
 
     # ==========================
     # UI ACTIONS (MAIN THREAD ONLY)
